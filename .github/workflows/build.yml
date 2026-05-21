@@ -57,7 +57,9 @@ jobs:
     - name: Assemble release directory
       run: |
         mkdir release
-        cp target/GhidraMCP-*-SNAPSHOT.zip release/
+        # Match any pom version (1.0-SNAPSHOT, 1.5.1, ...); the assembly
+        # plugin's finalName is GhidraMCP-${version}.zip.
+        cp target/GhidraMCP-*.zip release/
         cp bridge_mcp_ghidra.py release/
 
     - name: Upload artifact
