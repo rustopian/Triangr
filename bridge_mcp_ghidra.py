@@ -558,6 +558,36 @@ def get_structure(name: str) -> str:
     """
     return "\n".join(safe_get("get_structure", {"name": name}))
 
+@mcp.tool()
+def check_server_health() -> str:
+    """
+    Probe the GhidraMCP HTTP server's /health endpoint and summarize the
+    response. Useful for diagnosing whether the Ghidra plugin is loaded and
+    responding.
+    """
+    import json
+
+    url = urljoin(ghidra_server_url, "health")
+    try:
+        response = get_http_client().get(url, timeout=5.0)
+        if response.status_code == 200:
+            data = response.json()
+            status = data.get("status", "UNKNOWN")
+            if status == "OK":
+                return (
+                    f"OK - Server healthy\n"
+                    f"Running: {data.get('server_running')}\n"
+                    f"Watchdog: {data.get('watchdog_healthy')}\n"
+                    f"Program: {data.get('program_loaded')}\n"
+                    f"Uptime: {data.get('uptime_ms')}ms\n"
+                    f"Last request: {data.get('last_request_ms_ago')}ms ago\n"
+                    f"Port: {data.get('port')}"
+                )
+            return f"ERROR - Server unhealthy"
+        return f"ERROR - Server returned status {response.status_code}"
+    except Exception as e:
+        return f"ERROR - Server unreachable: {str(e)}"
+
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
     parser.add_argument("--ghidra-server", type=str, default=DEFAULT_GHIDRA_SERVER,
