@@ -78,6 +78,10 @@ public class GhidraMCPPlugin extends Plugin {
     private static final String HOST_OPTION_NAME = "Server Host IP/NAME";
     private static final String DEFAULT_HOST = "127.0.0.1";
 
+    // Cap /read_bytes length to avoid OOM from a single oversized request
+    // (localhost-only, but still: a 2GB request would kill the JVM).
+    private static final int READ_BYTES_MAX = 1024 * 1024; // 1 MiB
+
     // Async task management
     private final ConcurrentHashMap<String, AsyncTask> asyncTasks = new ConcurrentHashMap<>();
     private final ExecutorService asyncExecutor = Executors.newCachedThreadPool();
@@ -595,7 +599,19 @@ public class GhidraMCPPlugin extends Plugin {
 
             try {
                 Address address = currentProgram.getAddressFactory().getAddress(addressStr);
-                int length = Integer.parseInt(lengthStr);
+                int length;
+                try {
+                    length = Integer.parseInt(lengthStr);
+                } catch (NumberFormatException nfe) {
+                    sendResponse(exchange, "Invalid 'length' parameter (not an integer)", 400);
+                    return;
+                }
+                // Reject negative / zero / unreasonably large requests up front
+                // (Integer.parseInt of "2000000000" would otherwise try to allocate ~2GB).
+                if (length <= 0 || length > READ_BYTES_MAX) {
+                    sendResponse(exchange, "length must be in 1.." + READ_BYTES_MAX, 400);
+                    return;
+                }
 
                 Memory memory = currentProgram.getMemory();
                 byte[] bytes = new byte[length];
@@ -639,10 +655,26 @@ public class GhidraMCPPlugin extends Plugin {
                 Address address = currentProgram.getAddressFactory().getAddress(addressStr);
                 Memory memory = currentProgram.getMemory();
 
-                String[] byteTokens = bytesStr.trim().split("\\s+");
+                String trimmed = bytesStr.trim();
+                if (trimmed.isEmpty()) {
+                    sendResponse(exchange, "'bytes' must contain at least one hex token", 400);
+                    return;
+                }
+                String[] byteTokens = trimmed.split("\\s+");
                 byte[] newBytes = new byte[byteTokens.length];
                 for (int i = 0; i < byteTokens.length; i++) {
-                    newBytes[i] = (byte) Integer.parseInt(byteTokens[i], 16);
+                    int v;
+                    try {
+                        v = Integer.parseInt(byteTokens[i], 16);
+                    } catch (NumberFormatException nfe) {
+                        sendResponse(exchange, "Invalid hex token at index " + i + ": '" + byteTokens[i] + "'", 400);
+                        return;
+                    }
+                    if (v < 0 || v > 0xFF) {
+                        sendResponse(exchange, "Hex token at index " + i + " out of byte range (0..0xFF): '" + byteTokens[i] + "'", 400);
+                        return;
+                    }
+                    newBytes[i] = (byte) v;
                 }
 
                 Address endAddress = address.add(newBytes.length - 1);
