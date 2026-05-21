@@ -588,6 +588,34 @@ def check_server_health() -> str:
     except Exception as e:
         return f"ERROR - Server unreachable: {str(e)}"
 
+@mcp.tool()
+def read_bytes(address: str, length: int = 32) -> str:
+    """
+    Read raw bytes from memory at the given address.
+
+    Args:
+        address: Starting address in hex (e.g. "0x00401000")
+        length: Number of bytes to read (default: 32)
+
+    Returns:
+        Hex string of the bytes, space-separated (e.g. "55 8b ec ...")
+    """
+    return safe_get("read_bytes", {"address": address, "length": length})
+
+@mcp.tool()
+def write_bytes(address: str, bytes_hex: str) -> str:
+    """
+    Writes a sequence of bytes to the specified address in the program's memory.
+
+    Args:
+        address: Destination address (e.g., "0x140001000")
+        bytes_hex: Sequence of space-separated bytes in hexadecimal format (e.g., "90 90 90 90")
+
+    Returns:
+        Result of the operation (e.g., "Bytes written successfully" or a detailed error)
+    """
+    return safe_post("write_bytes", {"address": address, "bytes": bytes_hex})
+
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
     parser.add_argument("--ghidra-server", type=str, default=DEFAULT_GHIDRA_SERVER,
