@@ -84,6 +84,7 @@ public class GhidraMCPPlugin extends Plugin {
     // Cap /read_bytes length to avoid OOM from a single oversized request
     // (localhost-only, but still: a 2GB request would kill the JVM).
     private static final int READ_BYTES_MAX = 1024 * 1024; // 1 MiB
+    private static final int WRITE_BYTES_MAX = 1024 * 1024; // 1 MiB
 
     // Async task management
     // Cap retained tasks so a long Ghidra session does not accumulate decompiled
@@ -700,6 +701,10 @@ public class GhidraMCPPlugin extends Plugin {
                     return;
                 }
                 String[] byteTokens = trimmed.split("\\s+");
+                if (byteTokens.length > WRITE_BYTES_MAX) {
+                    sendResponse(exchange, "write exceeds maximum " + WRITE_BYTES_MAX + " bytes", 400);
+                    return;
+                }
                 byte[] newBytes = new byte[byteTokens.length];
                 for (int i = 0; i < byteTokens.length; i++) {
                     int v;
@@ -730,19 +735,44 @@ public class GhidraMCPPlugin extends Plugin {
                     return;
                 }
 
-                int txId = currentProgram.startTransaction("Write Bytes");
-                boolean success = false;
+                // Commit the actual byte write in its own transaction so a
+                // post-write disassembly failure cannot silently roll back the
+                // user's intended patch.
+                int writeTx = currentProgram.startTransaction("Write Bytes");
+                boolean writeOk = false;
                 try {
                     currentProgram.getListing().clearCodeUnits(address, endAddress, false);
                     memory.setBytes(address, newBytes);
-                    Disassembler disassembler = Disassembler.getDisassembler(currentProgram, TaskMonitor.DUMMY, null);
-                    disassembler.disassemble(address, null);
-                    success = true;
+                    writeOk = true;
                 } finally {
-                    currentProgram.endTransaction(txId, success);
+                    currentProgram.endTransaction(writeTx, writeOk);
                 }
 
-                sendResponse(exchange, "Bytes written successfully");
+                if (!writeOk) {
+                    sendResponse(exchange, "Write failed; transaction rolled back", 500);
+                    return;
+                }
+
+                // Best-effort re-disassembly in a separate transaction. If
+                // this fails (e.g. the new bytes are mid-instruction), the
+                // listing may show '??', but the write itself stays committed.
+                int disasmTx = currentProgram.startTransaction("Disassemble after write");
+                boolean disasmOk = false;
+                String disasmWarning = null;
+                try {
+                    Disassembler disassembler = Disassembler.getDisassembler(currentProgram, TaskMonitor.DUMMY, null);
+                    disassembler.disassemble(address, null);
+                    disasmOk = true;
+                } catch (Exception disasmEx) {
+                    disasmWarning = disasmEx.getMessage();
+                    Msg.warn(this, "Disassembly after /write_bytes failed", disasmEx);
+                } finally {
+                    currentProgram.endTransaction(disasmTx, disasmOk);
+                }
+
+                sendResponse(exchange, disasmOk
+                    ? "Bytes written successfully"
+                    : "Bytes written successfully; re-disassembly skipped: " + disasmWarning);
             } catch (Exception e) {
                 sendResponse(exchange, "Error: " + e.getMessage(), 500);
             }
