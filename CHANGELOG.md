@@ -10,50 +10,53 @@ The "Unreleased" section accumulates changes since the upstream `v1-4` release
 
 ## [1.5.1] - 2026-05-21
 
-Hardening pass driven by a post-merge security review of every PR landed
-in 1.5.0, plus the build pipeline fixes that surfaced when CI finally
-ran, plus the first test coverage this project has ever had.
+Hardening pass driven by a post-merge review of every PR landed in 1.5.0,
+plus the build pipeline fixes that surfaced when CI finally ran, plus the
+first test coverage this project has ever had.
 
-### Fixed (security review)
-- **#9 packaging is now installable**: `pyproject.toml` deps no longer
-  claim `requests`; aligned to `httpx>=0.27,<1` + `tenacity>=8.2,<10`
-  to match the script's imports. A `pip install` of 1.5.0 would have
-  failed at first import.
+### Security
+- **#12 `resolveDataType` input cap**: rejects type expressions longer
+  than 512 chars. Closes a Ghidra-OOM DoS via huge array syntax like
+  `char[2147483647][2147483647]`. The listener is localhost-only so
+  this was never remotely exploitable, but it's tightened anyway.
+
+### Fixed
+- **#9 `pyproject.toml` deps no longer claim `requests`**: aligned to
+  `httpx>=0.27,<1` + `tenacity>=8.2,<10` to match the script's imports.
+  A `pip install` of 1.5.0 would have failed at first import.
 - **#8 async-decompile lifecycle**: replaced `newCachedThreadPool` with
   a fixed-size pool (host CPUs, min 2) + named daemon `ThreadFactory`;
   capped the `asyncTasks` map at 256 entries with oldest-first eviction
   on submission; `dispose()` now `shutdownNow()` + `awaitTermination` +
   clears the map so plugin reloads don't leak threads.
-- **#12 type-parser guards**: `resolveDataType` rejects type expressions
-  longer than 512 chars (closes a Ghidra-OOM DoS via huge array syntax
-  like `char[2^31][2^31]`). `add_structure_field` at-offset refuses
-  dynamic (length ≤ 0) types up front with a clear error instead of
-  bubbling `IllegalArgumentException`.
+- **#12 `add_structure_field` at-offset** refuses dynamic
+  (length ≤ 0) types up front with a clear error instead of bubbling
+  `IllegalArgumentException`.
 - **#7 decompile timeout is now effective**: the `timeout` parameter on
   `decompile_by_addr` and `decompile_function_async` is plumbed through
   to `DecompInterface.decompileFunction(func, N, monitor)`. Previously
   only the HTTP socket honored it; the server gave up at the hardcoded
   30 s and the bridge kept the socket open silently.
-- **#11 write_bytes preserves the write on disasm failure**: the byte
+- **#11 `write_bytes` preserves the write on disasm failure**: the byte
   write now commits in its own transaction; re-disassembly runs in a
   separate best-effort transaction so a flow-following failure no
   longer silently rolls back the patch. Added `WRITE_BYTES_MAX = 1 MiB`
   cap mirroring `READ_BYTES_MAX`.
+- **Ghidra 11.3.2 compatibility for `DataTypeManager.remove`**: use the
+  deprecated-in-12.x two-arg `remove(DataType, TaskMonitor)` form, since
+  the single-arg `remove(DataType)` only exists in Ghidra 12.x. The CI
+  matrix exposed this immediately.
 
-### Fixed (build pipeline)
+### Build pipeline
 - **`hatch-vcs` tag pattern accepts the `v` prefix**, so the release
   workflow can derive the version from `v1.5.1` (previously: "tag
   'v1.5.1' no version found" → wheel build aborted).
-- **Ghidra 11.3.2 compat restored** for `DataTypeManager.remove`: use
-  the deprecated-in-12.x two-arg `remove(DataType, TaskMonitor)` form,
-  since the single-arg `remove(DataType)` only exists in Ghidra 12.x.
-  The CI matrix exposed this immediately.
 - **Build `assemble` step matches any pom version**, not just
   `*-SNAPSHOT.zip`. With the pom version bumped from `1.0-SNAPSHOT` to
   `1.5.1`, the Maven assembly produces `GhidraMCP-1.5.1.zip` and the
   old glob was missing it.
 
-### Added (test infrastructure)
+### Added
 - **Tier 1 pytest contract tests for the Python bridge**
   (`tests/test_bridge.py`, 63 tests): every MCP tool the bridge exposes
   is exercised against a mocked Ghidra HTTP server (`pytest-httpx`).
