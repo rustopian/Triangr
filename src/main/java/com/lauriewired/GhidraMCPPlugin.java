@@ -1836,7 +1836,19 @@ public class GhidraMCPPlugin extends Plugin {
      * @param typeName The type name to resolve
      * @return The resolved DataType, or null if not found
      */
+    private static final int TYPE_NAME_MAX = 512;
+
     private DataType resolveDataType(DataTypeManager dtm, String typeName) {
+        if (typeName == null) return null;
+        // Reject pathological inputs (e.g. "int" + "[2147483647]"*N) up front so
+        // DataTypeParser does not get a chance to allocate a multi-GB nested
+        // array.
+        if (typeName.length() > TYPE_NAME_MAX) {
+            Msg.warn(this, "Type expression too long (" + typeName.length()
+                + " > " + TYPE_NAME_MAX + ")");
+            return null;
+        }
+
         // First try a direct name match in the program's own data type manager.
         DataType direct = findDataTypeByNameInAllCategories(dtm, typeName);
         if (direct != null) {
@@ -2023,6 +2035,12 @@ public class GhidraMCPPlugin extends Plugin {
                     } else {
                         if (offset.intValue() < 0) {
                             result.append("Error: offset must be >= 0");
+                            return;
+                        }
+                        if (fieldDt.getLength() <= 0) {
+                            result.append("Error: type '").append(fieldDt.getName())
+                                  .append("' has no fixed length; insertAtOffset requires one. "
+                                      + "Append (omit offset) or pick a sized type.");
                             return;
                         }
                         struct.insertAtOffset(offset.intValue(), fieldDt, fieldDt.getLength(),
