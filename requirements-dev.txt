@@ -1,0 +1,4 @@
+# Test deps for the Python bridge.
+# Runtime deps for bridge_mcp_ghidra.py are declared in pyproject.toml.
+pytest>=8.0
+pytest-httpx>=0.30
