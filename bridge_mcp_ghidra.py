@@ -219,6 +219,58 @@ def decompile_by_addr(address: str, timeout: int = 120) -> str:
     return "\n".join(safe_get("decompile_function", {"address": address}, timeout=float(timeout)))
 
 @mcp.tool()
+def decompile_function_async(address: str, timeout: int = 300) -> dict:
+    """
+    Start async decompilation of a function. Returns immediately with a task_id.
+    Use get_task_status() to poll for completion, then get_task_result() to get output.
+    
+    Args:
+        address: Function address in hex format (e.g. "0x1400010a0")
+        timeout: Decompilation timeout in seconds (default: 300, max: 600)
+    
+    Returns:
+        Dict with task_id and initial status
+    """
+    import json
+    timeout = max(10, min(timeout, TIMEOUT_DECOMPILE_MAX))
+    result = safe_get("decompile_async", {"address": address, "timeout": timeout}, timeout=10.0)
+    try:
+        return json.loads("\n".join(result))
+    except:
+        return {"error": "\n".join(result)}
+
+@mcp.tool()
+def get_task_status(task_id: str) -> dict:
+    """
+    Check the status of an async decompilation task.
+    
+    Args:
+        task_id: Task ID from decompile_function_async()
+    
+    Returns:
+        Dict with status, progress, elapsed_ms, and error (if failed)
+    """
+    import json
+    result = safe_get("task_status", {"task_id": task_id}, timeout=5.0)
+    try:
+        return json.loads("\n".join(result))
+    except:
+        return {"error": "\n".join(result)}
+
+@mcp.tool()
+def get_task_result(task_id: str) -> str:
+    """
+    Get the result of a completed async decompilation task.
+    
+    Args:
+        task_id: Task ID from decompile_function_async()
+    
+    Returns:
+        Decompiled C code or error message
+    """
+    return "\n".join(safe_get("task_result", {"task_id": task_id}, timeout=10.0))
+
+@mcp.tool()
 def disassemble_function(address: str) -> list:
     """
     Get assembly code (address: instruction; comment) for a function.
