@@ -1,3 +1,9 @@
+> **This is a maintained fork** of the original
+> [LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraMCP), which has
+> not received updates in roughly a year. New endpoints, bug fixes, and
+> incorporated pull requests are listed in [CHANGELOG.md](CHANGELOG.md).
+> Credit for the original work, design, and naming belongs to LaurieWired.
+
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/releases)
 [![GitHub stars](https://img.shields.io/github/stars/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/stargazers)
