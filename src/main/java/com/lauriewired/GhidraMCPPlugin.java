@@ -1009,14 +1009,20 @@ public class GhidraMCPPlugin extends Plugin {
         final Function finalFunction = func;
         AtomicBoolean successFlag = new AtomicBoolean(false);
 
+        final HighFunction finalHighFunction = highFunction;
         try {
-            SwingUtilities.invokeAndWait(() -> {           
+            SwingUtilities.invokeAndWait(() -> {
                 int tx = program.startTransaction("Rename variable");
                 try {
                     if (commitRequired) {
-                        HighFunctionDBUtil.commitParamsToDatabase(highFunction, false,
+                        HighFunctionDBUtil.commitParamsToDatabase(finalHighFunction, false,
                             ReturnCommitOption.NO_COMMIT, finalFunction.getSignatureSource());
                     }
+                    // Persist decompiler-generated local names (uVar1, local_10, ...)
+                    // to the database before renaming, otherwise updateDBVariable can
+                    // silently fail to take effect on the first attempt.
+                    HighFunctionDBUtil.commitLocalNamesToDatabase(finalHighFunction,
+                        SourceType.USER_DEFINED);
                     HighFunctionDBUtil.updateDBVariable(
                         finalHighSymbol,
                         newVarName,
@@ -1029,7 +1035,7 @@ public class GhidraMCPPlugin extends Plugin {
                     Msg.error(this, "Failed to rename variable", e);
                 }
                 finally {
-                    successFlag.set(program.endTransaction(tx, true));
+                    program.endTransaction(tx, successFlag.get());
                 }
             });
         } catch (InterruptedException | InvocationTargetException e) {
