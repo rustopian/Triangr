@@ -1,0 +1,15 @@
+GhidraMCP
+Copyright 2025 LaurieWired (original author)
+Copyright 2026 rustopian and contributors (this fork)
+
+This product is a maintained fork of https://github.com/LaurieWired/GhidraMCP,
+licensed under the Apache License, Version 2.0.
+
+See CHANGELOG.md for a list of changes made in this fork.
+
+------------------------------------------------------------------------------
+
+Significant contributions in this fork incorporate work originally proposed as
+pull requests against LaurieWired/GhidraMCP. Each contributor's authorship is
+preserved in the git history. CHANGELOG.md notes the upstream PR number for
+each integrated change.
