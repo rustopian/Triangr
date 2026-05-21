@@ -317,7 +317,8 @@ public class GhidraMCPPlugin extends Plugin {
         server.createContext("/decompile_function", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
-            sendResponse(exchange, decompileFunctionByAddress(address));
+            int timeout = parseIntOrDefault(qparams.get("timeout"), DECOMPILE_TIMEOUT_DEFAULT);
+            sendResponse(exchange, decompileFunctionByAddress(address, timeout));
         });
 
         // Async decompilation endpoints
@@ -328,6 +329,7 @@ public class GhidraMCPPlugin extends Plugin {
                 sendJsonResponse(exchange, 400, "{\"error\":\"Address is required\"}");
                 return;
             }
+            int timeout = parseIntOrDefault(qparams.get("timeout"), DECOMPILE_TIMEOUT_DEFAULT);
             String taskId = UUID.randomUUID().toString();
             AsyncTask task = new AsyncTask(taskId);
             evictOldestTaskIfFull();
@@ -335,7 +337,7 @@ public class GhidraMCPPlugin extends Plugin {
             asyncExecutor.submit(() -> {
                 task.status = "running";
                 try {
-                    String result = decompileFunctionByAddress(address);
+                    String result = decompileFunctionByAddress(address, timeout);
                     if (result.startsWith("No program") || result.startsWith("Error") || 
                         result.startsWith("Could not find") || result.startsWith("Decompilation")) {
                         task.status = "failed";
@@ -1209,12 +1211,31 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
-     * Decompile a function at the given address
+     * Server-side decompile timeout knobs. The Python bridge clamps its own
+     * timeout in 10..1800; clamp again here so a malformed query param can't
+     * either disable the deadline or set a useless tiny one.
      */
-    private String decompileFunctionByAddress(String addressStr) {
+    private static final int DECOMPILE_TIMEOUT_MIN = 10;
+    private static final int DECOMPILE_TIMEOUT_MAX = 1800;
+    private static final int DECOMPILE_TIMEOUT_DEFAULT = 30;
+
+    private static int clampDecompileTimeout(int requested) {
+        return Math.max(DECOMPILE_TIMEOUT_MIN,
+            Math.min(requested, DECOMPILE_TIMEOUT_MAX));
+    }
+
+    /**
+     * Decompile a function at the given address with a caller-provided timeout
+     * (in seconds). The timeout is plumbed into Ghidra's
+     * DecompInterface.decompileFunction so it actually applies to the work,
+     * not just the HTTP socket.
+     */
+    private String decompileFunctionByAddress(String addressStr, int timeoutSeconds) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        int timeout = clampDecompileTimeout(timeoutSeconds);
 
         try {
             Address addr = program.getAddressFactory().getAddress(addressStr);
@@ -1223,10 +1244,10 @@ public class GhidraMCPPlugin extends Plugin {
 
             DecompInterface decomp = new DecompInterface();
             decomp.openProgram(program);
-            DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+            DecompileResults result = decomp.decompileFunction(func, timeout, new ConsoleTaskMonitor());
 
-            return (result != null && result.decompileCompleted()) 
-                ? result.getDecompiledFunction().getC() 
+            return (result != null && result.decompileCompleted())
+                ? result.getDecompiledFunction().getC()
                 : "Decompilation failed";
         } catch (Exception e) {
             return "Error decompiling function: " + e.getMessage();

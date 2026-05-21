@@ -216,7 +216,13 @@ def decompile_by_addr(address: str, timeout: int = 120) -> str:
     """
     # Clamp timeout to valid range
     timeout = max(10, min(timeout, TIMEOUT_DECOMPILE_MAX))
-    return "\n".join(safe_get("decompile_function", {"address": address}, timeout=float(timeout)))
+    # Pass timeout both as a query parameter (so the Ghidra server honors it on
+    # DecompInterface.decompileFunction) and as the HTTP read deadline (so the
+    # bridge does not give up before the server can answer).
+    return "\n".join(safe_get(
+        "decompile_function",
+        {"address": address, "timeout": timeout},
+        timeout=float(timeout)))
 
 @mcp.tool()
 def decompile_function_async(address: str, timeout: int = 300) -> dict:
