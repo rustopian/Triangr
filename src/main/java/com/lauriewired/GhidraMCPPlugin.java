@@ -37,6 +37,9 @@ import ghidra.program.model.data.DataTypeComponent;
 import ghidra.program.model.data.DataTypeConflictHandler;
 import ghidra.program.model.data.DataTypeManager;
 import ghidra.program.model.data.PointerDataType;
+import ghidra.app.services.DataTypeManagerService;
+import ghidra.util.data.DataTypeParser;
+import ghidra.util.data.DataTypeParser.AllowedDataTypes;
 import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.TypedefDataType;
@@ -1794,88 +1797,57 @@ public class GhidraMCPPlugin extends Plugin {
      * @return The resolved DataType, or null if not found
      */
     private DataType resolveDataType(DataTypeManager dtm, String typeName) {
-        // First try to find exact match in all categories
-        DataType dataType = findDataTypeByNameInAllCategories(dtm, typeName);
-        if (dataType != null) {
-            Msg.info(this, "Found exact data type match: " + dataType.getPathName());
-            return dataType;
+        // First try a direct name match in the program's own data type manager.
+        DataType direct = findDataTypeByNameInAllCategories(dtm, typeName);
+        if (direct != null) {
+            return direct;
         }
 
-        // Handle conventional "<Name> *" / "<Name>*" pointer syntax (e.g. "MyStruct *", "int **")
-        String trimmed = typeName.trim();
-        if (trimmed.endsWith("*")) {
-            String baseName = trimmed.substring(0, trimmed.length() - 1).trim();
-            if (!baseName.isEmpty()) {
-                DataType base = resolveDataType(dtm, baseName);
-                if (base != null) {
-                    return new PointerDataType(base);
+        // Then delegate to Ghidra's built-in DataTypeParser, which understands
+        // pointer/array syntax ("MyStruct *", "int [16]", "void **"), built-in
+        // type aliases ("uint32_t", "dword"), function-pointer types, and so on.
+        // Search the program's own DTM first, then any other open data type
+        // managers (Generic, the user's open archives, etc.).
+        DataTypeManagerService dtms = tool.getService(DataTypeManagerService.class);
+        if (dtms != null) {
+            List<DataTypeManager> managers = new ArrayList<>();
+            managers.add(dtm);
+            for (DataTypeManager other : dtms.getDataTypeManagers()) {
+                if (other != dtm) {
+                    managers.add(other);
+                }
+            }
+            for (DataTypeManager manager : managers) {
+                try {
+                    DataTypeParser parser =
+                        new DataTypeParser(manager, null, null, AllowedDataTypes.ALL);
+                    DataType parsed = parser.parse(typeName);
+                    if (parsed != null) {
+                        return parsed;
+                    }
+                } catch (Exception e) {
+                    // try next manager
                 }
             }
         }
 
-        // Check for Windows-style pointer types (PXXX)
+        // Last-ditch fallback: keep the Windows-style "PXXX" support that
+        // the original plugin relied on, then defer to int.
         if (typeName.startsWith("P") && typeName.length() > 1) {
             String baseTypeName = typeName.substring(1);
-
-            // Special case for PVOID
             if (baseTypeName.equals("VOID")) {
                 return new PointerDataType(dtm.getDataType("/void"));
             }
-
-            // Try to find the base type
             DataType baseType = findDataTypeByNameInAllCategories(dtm, baseTypeName);
             if (baseType != null) {
                 return new PointerDataType(baseType);
             }
-
             Msg.warn(this, "Base type not found for " + typeName + ", defaulting to void*");
             return new PointerDataType(dtm.getDataType("/void"));
         }
 
-        // Handle common built-in types
-        switch (typeName.toLowerCase()) {
-            case "int":
-            case "long":
-                return dtm.getDataType("/int");
-            case "uint":
-            case "unsigned int":
-            case "unsigned long":
-            case "dword":
-                return dtm.getDataType("/uint");
-            case "short":
-                return dtm.getDataType("/short");
-            case "ushort":
-            case "unsigned short":
-            case "word":
-                return dtm.getDataType("/ushort");
-            case "char":
-            case "byte":
-                return dtm.getDataType("/char");
-            case "uchar":
-            case "unsigned char":
-                return dtm.getDataType("/uchar");
-            case "longlong":
-            case "__int64":
-                return dtm.getDataType("/longlong");
-            case "ulonglong":
-            case "unsigned __int64":
-                return dtm.getDataType("/ulonglong");
-            case "bool":
-            case "boolean":
-                return dtm.getDataType("/bool");
-            case "void":
-                return dtm.getDataType("/void");
-            default:
-                // Try as a direct path
-                DataType directType = dtm.getDataType("/" + typeName);
-                if (directType != null) {
-                    return directType;
-                }
-
-                // Fallback to int if we couldn't find it
-                Msg.warn(this, "Unknown type: " + typeName + ", defaulting to int");
-                return dtm.getDataType("/int");
-        }
+        Msg.warn(this, "Unknown type: " + typeName + ", defaulting to int");
+        return dtm.getDataType("/int");
     }
     
     /**
