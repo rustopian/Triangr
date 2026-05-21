@@ -46,7 +46,10 @@ include = [
 
 [tool.hatch.version]
 source = "vcs"
-tag-pattern = "(?P<version>\\d+\\.\\d+(?:\\.\\d+)?)"
+# Accept both "v1.5.1" and bare "1.5.1" style tags; the leading 'v' is
+# optional. Without this, hatch-vcs prints "tag '...' no version found"
+# and the build_sdist hook aborts with AssertionError.
+tag-pattern = "v?(?P<version>\\d+\\.\\d+(?:\\.\\d+)?)"
 fallback-version = "0.0"
 
 [tool.hatch.build.targets.wheel]
