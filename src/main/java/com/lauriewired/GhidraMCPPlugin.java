@@ -7,10 +7,6 @@ import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.*;
-import ghidra.program.model.symbol.ReferenceManager;
-import ghidra.program.model.symbol.Reference;
-import ghidra.program.model.symbol.ReferenceIterator;
-import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.LocalSymbolMap;
@@ -22,11 +18,9 @@ import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.plugin.PluginCategoryNames;
 import ghidra.app.services.CodeViewerService;
 import ghidra.app.services.ProgramManager;
+import ghidra.program.disassemble.Disassembler;
 import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.cmd.function.SetVariableNameCmd;
-import ghidra.program.model.symbol.SourceType;
-import ghidra.program.model.listing.LocalVariableImpl;
-import ghidra.program.model.listing.ParameterImpl;
 import ghidra.util.exception.DuplicateNameException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.framework.plugintool.PluginInfo;
@@ -47,10 +41,12 @@ import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.TypedefDataType;
 import ghidra.program.model.data.Undefined1DataType;
-import ghidra.program.model.listing.Variable;
 import ghidra.app.decompiler.component.DecompilerUtils;
 import ghidra.app.decompiler.ClangToken;
 import ghidra.framework.options.Options;
+
+import ghidra.program.model.mem.Memory;
+import ghidra.program.model.mem.MemoryAccessException;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -81,6 +77,10 @@ public class GhidraMCPPlugin extends Plugin {
     private static final int DEFAULT_PORT = 8080;
     private static final String HOST_OPTION_NAME = "Server Host IP/NAME";
     private static final String DEFAULT_HOST = "127.0.0.1";
+
+    // Cap /read_bytes length to avoid OOM from a single oversized request
+    // (localhost-only, but still: a 2GB request would kill the JVM).
+    private static final int READ_BYTES_MAX = 1024 * 1024; // 1 MiB
 
     // Async task management
     private final ConcurrentHashMap<String, AsyncTask> asyncTasks = new ConcurrentHashMap<>();
@@ -574,6 +574,139 @@ public class GhidraMCPPlugin extends Plugin {
             updateLastRequestTime();
             String json = buildHealthJson();
             sendJsonResponse(exchange, json);
+        });
+
+        server.createContext("/read_bytes", exchange -> {
+            if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
+                sendResponse(exchange, "Method Not Allowed", 405);
+                return;
+            }
+
+            Map<String, String> queryParams = parseQueryParams(exchange);
+            String addressStr = queryParams.get("address");
+            String lengthStr = queryParams.getOrDefault("length", "32");
+
+            if (addressStr == null) {
+                sendResponse(exchange, "Missing 'address' parameter", 400);
+                return;
+            }
+
+            Program currentProgram = getCurrentProgram();
+            if (currentProgram == null) {
+                sendResponse(exchange, "No active program", 500);
+                return;
+            }
+
+            try {
+                Address address = currentProgram.getAddressFactory().getAddress(addressStr);
+                int length;
+                try {
+                    length = Integer.parseInt(lengthStr);
+                } catch (NumberFormatException nfe) {
+                    sendResponse(exchange, "Invalid 'length' parameter (not an integer)", 400);
+                    return;
+                }
+                // Reject negative / zero / unreasonably large requests up front
+                // (Integer.parseInt of "2000000000" would otherwise try to allocate ~2GB).
+                if (length <= 0 || length > READ_BYTES_MAX) {
+                    sendResponse(exchange, "length must be in 1.." + READ_BYTES_MAX, 400);
+                    return;
+                }
+
+                Memory memory = currentProgram.getMemory();
+                byte[] bytes = new byte[length];
+                memory.getBytes(address, bytes);
+
+                StringBuilder sb = new StringBuilder();
+                for (byte b : bytes) {
+                    sb.append(String.format("%02x ", b));
+                }
+
+                sendResponse(exchange, sb.toString().trim());
+            } catch (MemoryAccessException e) {
+                sendResponse(exchange, "Memory access error: " + e.getMessage(), 500);
+            } catch (Exception e) {
+                sendResponse(exchange, "Error: " + e.getMessage(), 500);
+            }
+        });
+
+        server.createContext("/write_bytes", exchange -> {
+            if (!exchange.getRequestMethod().equalsIgnoreCase("POST")) {
+                sendResponse(exchange, "Method Not Allowed", 405);
+                return;
+            }
+
+            Map<String, String> params = parsePostParams(exchange);
+            String addressStr = params.get("address");
+            String bytesStr = params.get("bytes");
+
+            if (addressStr == null || bytesStr == null) {
+               sendResponse(exchange, "Missing 'address' or 'bytes' parameter", 400);
+               return;
+            }
+
+            Program currentProgram = getCurrentProgram();
+            if (currentProgram == null) {
+                sendResponse(exchange, "No active program", 500);
+                return;
+            }
+
+            try {
+                Address address = currentProgram.getAddressFactory().getAddress(addressStr);
+                Memory memory = currentProgram.getMemory();
+
+                String trimmed = bytesStr.trim();
+                if (trimmed.isEmpty()) {
+                    sendResponse(exchange, "'bytes' must contain at least one hex token", 400);
+                    return;
+                }
+                String[] byteTokens = trimmed.split("\\s+");
+                byte[] newBytes = new byte[byteTokens.length];
+                for (int i = 0; i < byteTokens.length; i++) {
+                    int v;
+                    try {
+                        v = Integer.parseInt(byteTokens[i], 16);
+                    } catch (NumberFormatException nfe) {
+                        sendResponse(exchange, "Invalid hex token at index " + i + ": '" + byteTokens[i] + "'", 400);
+                        return;
+                    }
+                    if (v < 0 || v > 0xFF) {
+                        sendResponse(exchange, "Hex token at index " + i + " out of byte range (0..0xFF): '" + byteTokens[i] + "'", 400);
+                        return;
+                    }
+                    newBytes[i] = (byte) v;
+                }
+
+                Address endAddress = address.add(newBytes.length - 1);
+
+                if (!memory.contains(address) || !memory.contains(endAddress)) {
+                    sendResponse(exchange, "Memory range out of bounds or unmapped", 400);
+                    return;
+                }
+
+                byte[] existingBytes = new byte[newBytes.length];
+                int bytesRead = memory.getBytes(address, existingBytes);
+                if (bytesRead != newBytes.length) {
+                    sendResponse(exchange, "Mismatch: memory region size differs from replacement size", 400);
+                    return;
+                }
+
+                int txId = currentProgram.startTransaction("Write Bytes");
+                boolean success = false;
+                try {
+                    currentProgram.getListing().clearCodeUnits(address, endAddress, false);
+                    memory.setBytes(address, newBytes);
+                    Disassembler disassembler = Disassembler.getDisassembler(currentProgram, TaskMonitor.DUMMY, null);
+                    disassembler.disassemble(address, null);
+                    success = true;
+                } finally {
+                    currentProgram.endTransaction(txId, success);
+                }
+
+                sendResponse(exchange, "Bytes written successfully");
+            } catch (Exception e) {
+                sendResponse(exchange, "Error: " + e.getMessage(), 500);
+            }
         });
 
         server.setExecutor(null);
@@ -2623,6 +2756,14 @@ public class GhidraMCPPlugin extends Plugin {
         long idleTime = System.currentTimeMillis() - lastRequestTimestamp;
         if (idleTime > WATCHDOG_INTERVAL_MS * 2) watchdogHealthy = false;
         else watchdogHealthy = true;
+    }
+
+    private void sendResponse(HttpExchange exchange, String response, int statusCode) throws IOException {
+        byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+        exchange.sendResponseHeaders(statusCode, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
     }
 
     @Override
