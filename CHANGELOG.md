@@ -8,24 +8,88 @@ This is a fork of [LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraM
 The "Unreleased" section accumulates changes since the upstream `v1-4` release
 (commit `27f316f`).
 
-## [Unreleased]
+## [1.5.0] - 2026-05-21
 
-### Added
+### Added (this fork)
 - **Structure data type CRUD over MCP**: `create_structure`, `rename_structure`,
   `delete_structure`, `list_structures`, `get_structure`, `add_structure_field`,
   `rename_structure_field`, `delete_structure_field`, `set_field_type`,
   `resize_structure_field`, `create_structure_pointer`.
 - **`create_function`** endpoint: create a new function at an arbitrary entry
   address (delegates to Ghidra's `CreateFunctionCmd`).
-- `<TypeName> *` / `<TypeName>**` pointer syntax accepted by `resolveDataType`
-  alongside the existing Windows-style `PXXX` form.
 
-### Fixed
+### Fixed (this fork)
 - `rename_structure` and `delete_structure` no longer hang: DataTypeManager
   mutations now run on the HTTP worker thread instead of being dispatched to the
   Swing EDT, avoiding a listener-chain deadlock observed during `setName` /
   `remove`.
 
+### Integrated from upstream pull requests
+- [#56](https://github.com/LaurieWired/GhidraMCP/pull/56) (@Vesemir):
+  decompiler now respects `setRespectReadOnly(true)`, surfacing more constants
+  to the LLM.
+- [#57](https://github.com/LaurieWired/GhidraMCP/pull/57) (@Jegghins):
+  `read_bytes` / `write_bytes` memory primitives, plus forced disassembly after
+  writes so the listing doesn't show `??`. Hardened in a follow-up commit:
+  `/read_bytes` length capped at 1 MiB; `/write_bytes` rejects empty bodies and
+  invalid hex tokens with HTTP 400 rather than 500.
+- [#67](https://github.com/LaurieWired/GhidraMCP/pull/67) (@roya41, partial):
+  `resolveDataType` now delegates to Ghidra's built-in `DataTypeParser`, so
+  field/parameter types accept full C-style syntax (`MyStruct *`, `int [16]`,
+  function-pointer signatures, `uint32_t`/`dword` aliases, etc.).
+- [#108](https://github.com/LaurieWired/GhidraMCP/pull/108) (@nightlark):
+  `pyproject.toml` and a release-workflow that builds the Python wheel on
+  tag-push. The publish-to-PyPI step is intentionally disabled in this fork
+  (`if: false`) — the `ghidramcp` PyPI namespace belongs to upstream.
+- [#110](https://github.com/LaurieWired/GhidraMCP/pull/110) (@blinkysc,
+  partial): `rename_variable` now calls
+  `HighFunctionDBUtil.commitLocalNamesToDatabase` first, so renames of
+  decompiler-generated names like `uVar1` succeed on the first attempt.
+- [#116](https://github.com/LaurieWired/GhidraMCP/pull/116) (@jeFF0Falltrades):
+  eight long-named MCP tools shortened to fit OpenAI's 64-char tool-name limit
+  (`get_function_by_address` → `get_func_by_addr`, etc.). **Breaking** for any
+  caller relying on the old names.
+- [#119](https://github.com/LaurieWired/GhidraMCP/pull/119) (@le-jordon):
+  configurable bind host via a new tool option, defaulting to `127.0.0.1`.
+  Subsumes the hardcoded-bind fix proposed in #126.
+- [#121](https://github.com/LaurieWired/GhidraMCP/pull/121) (@jethac):
+  Python bridge switched from `requests` to `httpx` with connection pooling
+  and `tenacity` exponential-backoff retry.
+- [#123](https://github.com/LaurieWired/GhidraMCP/pull/123) (@jethac):
+  `decompile_by_addr` accepts a `timeout` parameter (capped at 1800 s).
+- [#124](https://github.com/LaurieWired/GhidraMCP/pull/124) (@jethac):
+  async decompilation — `decompile_function_async` / `get_task_status` /
+  `get_task_result` MCP tools backed by `/decompile_async`, `/task_status`,
+  `/task_result` endpoints. Server keeps an in-memory task registry keyed by
+  UUID.
+- [#132](https://github.com/LaurieWired/GhidraMCP/pull/132) (@ozymand-AI-s):
+  CI now builds against a Ghidra version matrix (`11.3.2` + `12.0.4`); pom
+  dependency versions and `extension.properties` follow suit. The version was
+  bumped 12.0.3 → 12.0.4 in a follow-up commit to match the current release.
+- [#149](https://github.com/LaurieWired/GhidraMCP/pull/149) (@daedalus):
+  `/health` JSON endpoint + watchdog thread; `check_server_health()` MCP tool.
+
+### Deferred upstream PRs
+The following upstream PRs were evaluated and **not** merged in this release;
+each has an open thread tracking it.
+- [#67](https://github.com/LaurieWired/GhidraMCP/pull/67) (struct-management
+  tools — duplicate of this fork's CRUD set; only the parser improvement was
+  taken).
+- [#110](https://github.com/LaurieWired/GhidraMCP/pull/110) (enum management +
+  `apply_struct_at_address` — useful, scoped for a follow-up release).
+- [#111](https://github.com/LaurieWired/GhidraMCP/pull/111) (LLM tool
+  annotations — would only annotate a subset of current tools; needs a fresh
+  pass covering everything added since).
+- [#122](https://github.com/LaurieWired/GhidraMCP/pull/122) (multi-instance
+  port scanning — threads a `target_binary` parameter through every tool;
+  needs a rebase against current main).
+- [#126](https://github.com/LaurieWired/GhidraMCP/pull/126) (hardcoded 127.0.0.1
+  bind — subsumed by #119).
+- [#139](https://github.com/LaurieWired/GhidraMCP/pull/139) (data-manipulation
+  + batch ops — the data-manipulation subset is worth taking; scoped for a
+  follow-up release).
+
 ### Maintenance
 - Established fork identity: added `NOTICE`, fork banner in `README.md`,
   this `CHANGELOG.md`, and a fork version (`1.5.0`).
+- Build/release CI workflows pulled in from #108 and #132.
