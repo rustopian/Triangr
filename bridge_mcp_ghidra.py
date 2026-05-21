@@ -28,6 +28,9 @@ ghidra_server_url = DEFAULT_GHIDRA_SERVER
 # HTTP client with connection pooling
 _http_client = None
 
+# Configurable timeouts (in seconds)
+TIMEOUT_DECOMPILE_MAX = 1800  # Maximum decompilation timeout (30 minutes)
+
 def get_http_client():
     global _http_client
     if _http_client is None:
@@ -43,7 +46,7 @@ def get_http_client():
     retry=retry_if_exception_type((httpx.ConnectError, httpx.ConnectTimeout)),
     reraise=True,
 )
-def safe_get(endpoint: str, params: dict = None) -> list:
+def safe_get(endpoint: str, params: dict = None, timeout: float = 30.0) -> list:
     """
     Perform a GET request with optional query parameters.
     """
@@ -53,7 +56,7 @@ def safe_get(endpoint: str, params: dict = None) -> list:
     url = urljoin(ghidra_server_url, endpoint)
 
     try:
-        response = get_http_client().get(url, params=params)
+        response = get_http_client().get(url, params=params, timeout=timeout)
         response.encoding = 'utf-8'
         if response.status_code == 200:
             return response.text.splitlines()
@@ -202,11 +205,18 @@ def list_functions() -> list:
     return safe_get("list_functions")
 
 @mcp.tool()
-def decompile_by_addr(address: str) -> str:
+def decompile_by_addr(address: str, timeout: int = 120) -> str:
     """
     Decompile a function at the given address.
+
+    Args:
+        address: Function address in hex format (e.g. "0x1400010a0")
+        timeout: Decompilation timeout in seconds (default: 120, max: 1800).
+                 Increase for large/complex functions.
     """
-    return "\n".join(safe_get("decompile_function", {"address": address}))
+    # Clamp timeout to valid range
+    timeout = max(10, min(timeout, TIMEOUT_DECOMPILE_MAX))
+    return "\n".join(safe_get("decompile_function", {"address": address}, timeout=float(timeout)))
 
 @mcp.tool()
 def disassemble_function(address: str) -> list:
