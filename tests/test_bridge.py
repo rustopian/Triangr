@@ -309,6 +309,186 @@ class TestAngrIntegrations:
             "--registers-json", '{"r1": "sv8", "r2": "0x10"}',
         ]
 
+    def test_angr_solve_constraints_at_builds_rich_solver_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/eternal.so\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+
+        def fake_run(args, timeout):
+            calls["args"] = args
+            calls["timeout"] = timeout
+            return "satisfiable: true"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+        out = bridge_module.angr_solve_constraints_at(
+            address="ram:00000180",
+            start_address="ram:00000120",
+            constraints_json='[{"type":"reg","name":"r1","op":"==","value":"0x10"}]',
+            eval_registers="r0,r1",
+            eval_memory_json='{"0x3000": 8}',
+            timeout=88,
+            max_steps=44)
+
+        assert out == "satisfiable: true"
+        assert calls["timeout"] == 88
+        assert calls["args"] == [
+            "--binary", "/tmp/eternal.so",
+            "--solve-at", "0x180",
+            "--max-steps", "44",
+            "--start-address", "0x120",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--constraints-json", '[{"type": "reg", "name": "r1", "op": "==", "value": "0x10"}]',
+            "--eval-memory-json", '{"0x3000": 8}',
+            "--eval-registers", "r0,r1",
+        ]
+
+    def test_angr_reachability_builds_cfg_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/eternal.so\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+        monkeypatch.setattr(
+            bridge_module,
+            "run_angr_helper",
+            lambda args, timeout: calls.setdefault("data", (args, timeout)) or "reachable: true")
+
+        bridge_module.angr_reachability(
+            "ram:00000120",
+            "ram:00000180",
+            complete_cfg=True,
+            include_path=False,
+            summary_limit=7,
+            timeout=99)
+
+        args, timeout = calls["data"]
+        assert timeout == 99
+        assert args == [
+            "--binary", "/tmp/eternal.so",
+            "--reachability-from", "0x120",
+            "--reachability-to", "0x180",
+            "--summary-limit", "7",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--complete-cfg",
+        ]
+
+    def test_angr_cfg_summary_builds_function_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/eternal.so\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+        monkeypatch.setattr(
+            bridge_module,
+            "run_angr_helper",
+            lambda args, timeout: calls.setdefault("data", (args, timeout)) or "cfg")
+
+        bridge_module.angr_cfg_summary(
+            function_address="ram:00000120",
+            summary_limit=5,
+            timeout=66)
+
+        args, timeout = calls["data"]
+        assert timeout == 66
+        assert args == [
+            "--binary", "/tmp/eternal.so",
+            "--cfg-summary",
+            "--summary-limit", "5",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--function-address", "0x120",
+        ]
+
+    def test_angr_callgraph_summary_builds_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/eternal.so\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+        monkeypatch.setattr(
+            bridge_module,
+            "run_angr_helper",
+            lambda args, timeout: calls.setdefault("data", (args, timeout)) or "callgraph")
+
+        bridge_module.angr_callgraph_summary(summary_limit=3, timeout=77)
+
+        args, timeout = calls["data"]
+        assert timeout == 77
+        assert args == [
+            "--binary", "/tmp/eternal.so",
+            "--callgraph-summary",
+            "--summary-limit", "3",
+            "--pcode-language", "eBPF:LE:64:default",
+        ]
+
+    def test_angr_lift_block_builds_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/eternal.so\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+        monkeypatch.setattr(
+            bridge_module,
+            "run_angr_helper",
+            lambda args, timeout: calls.setdefault("data", (args, timeout)) or "AIL")
+
+        bridge_module.angr_lift_block(
+            "ram:00000120",
+            lift_format="ail",
+            num_inst=4,
+            timeout=33)
+
+        args, timeout = calls["data"]
+        assert timeout == 33
+        assert args == [
+            "--binary", "/tmp/eternal.so",
+            "--lift-block", "0x120",
+            "--lift-format", "ail",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--num-inst", "4",
+        ]
+
+    def test_angr_compare_decompilers_batches_ghidra_and_oxidizer(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/eternal.so\n"
+                 "language_id: eBPF:LE:64:default")
+        httpx_mock.add_response(
+            url=_url("decompile_function?address=0x120&timeout=12"),
+            text="ghidra one")
+        httpx_mock.add_response(
+            url=_url("decompile_function?address=0x180&timeout=12"),
+            text="ghidra two")
+        calls = []
+
+        def fake_run(args, timeout):
+            calls.append((args, timeout))
+            return "oxidizer"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+        out = bridge_module.angr_compare_decompilers(
+            "ram:00000120, ram:00000180",
+            timeout_per_function=12,
+            max_functions=2)
+
+        assert "ghidra one" in out
+        assert "ghidra two" in out
+        assert len(calls) == 2
+        assert calls[0] == ([
+            "--binary", "/tmp/eternal.so",
+            "--address", "0x120",
+            "--rust",
+            "--skip-rust-setup",
+            "--pcode-language", "eBPF:LE:64:default",
+        ], 12)
+
     def test_angryghidra_check_setup_missing_is_clear(
             self, bridge_module, monkeypatch):
         monkeypatch.setattr(bridge_module, "find_angryghidra_script", lambda: "")

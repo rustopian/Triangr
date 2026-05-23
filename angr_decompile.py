@@ -85,25 +85,65 @@ def parse_csv_ints(value: str) -> list[int]:
     return [int(part.strip(), 0) for part in value.split(",") if part.strip()]
 
 
-def run_check(args: argparse.Namespace) -> int:
-    import angr
-
-    print(f"python: {sys.executable}")
-    print(f"angr: {angr.__version__}")
-    if args.binary:
-        project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
-        print(f"binary: {args.binary}")
-        print(f"arch: {project.arch}")
-        print(f"min_addr: {project.loader.main_object.min_addr:#x}")
-        print(f"max_addr: {project.loader.main_object.max_addr:#x}")
-    return 0
+def parse_csv_strings(value: str) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def run_symbolic_find(args: argparse.Namespace) -> int:
-    import angr
+def hex_addr(value: int) -> str:
+    return f"0x{value:x}"
+
+
+def build_cfg(project, args, function_starts: list[int] | None = None):
+    cfg_kwargs = {
+        "normalize": True,
+        "force_complete_scan": args.complete_cfg,
+    }
+    if function_starts:
+        cfg_kwargs["function_starts"] = function_starts
+        cfg_kwargs["force_complete_scan"] = False
+    return project.analyses.CFGFast(**cfg_kwargs)
+
+
+def get_cfg_node(cfg, address: int):
+    return cfg.model.get_any_node(address, anyaddr=True)
+
+
+def function_label(project, address: int | None) -> str:
+    if address is None:
+        return "unknown"
+    func = project.kb.functions.get_by_addr(address)
+    if func is None:
+        return hex_addr(address)
+    return f"{func.name} @ {hex_addr(func.addr)}"
+
+
+def normalize_register_name(project, reg_name: str) -> str:
+    if reg_name in project.arch.registers:
+        return reg_name
+    lowered = reg_name.lower()
+    if lowered in project.arch.registers:
+        return lowered
+    uppered = reg_name.upper()
+    if uppered in project.arch.registers:
+        return uppered
+    return reg_name
+
+
+def make_block(project, address: int, block_size: int = 0, num_inst: int = 0):
+    kwargs = {}
+    if block_size > 0:
+        kwargs["size"] = block_size
+    if num_inst > 0:
+        kwargs["num_inst"] = num_inst
+    return project.factory.block(address, **kwargs)
+
+
+def setup_symbolic_execution(args: argparse.Namespace, target_value: str):
     import claripy
 
-    target_addr = parse_address(args.symbolic_find)
+    target_addr = parse_address(target_value)
     avoid = [parse_address(value) for value in args.avoid_address.split(",") if value.strip()]
     project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
 
@@ -111,7 +151,7 @@ def run_symbolic_find(args: argparse.Namespace) -> int:
     symbolic_argv = []
     for index, length in enumerate(parse_csv_ints(args.argv_bytes), start=1):
         sym_arg = claripy.BVS(f"argv{index}", length * 8)
-        symbolic_argv.append((index, sym_arg))
+        symbolic_argv.append((index, length, sym_arg))
         argv.append(sym_arg)
 
     symbolic_stdin = None
@@ -145,22 +185,34 @@ def run_symbolic_find(args: argparse.Namespace) -> int:
         mem_addr = parse_address(str(addr))
         if isinstance(value, str):
             concrete = int(value, 0)
-            byte_len = max(1, (concrete.bit_length() + 7) // 8)
         else:
             concrete = int(value)
-            byte_len = max(1, (concrete.bit_length() + 7) // 8)
+        byte_len = max(1, (concrete.bit_length() + 7) // 8)
         state.memory.store(mem_addr, concrete, size=byte_len)
 
     symbolic_registers = {}
     registers = parse_json_map(args.registers_json, "registers_json")
     for reg_name, value in registers.items():
+        reg_name = normalize_register_name(project, reg_name)
         if isinstance(value, str) and value.startswith("sv"):
             byte_len = int(value[2:], 0)
             sym_reg = claripy.BVS(f"reg_{reg_name}", byte_len * 8)
-            symbolic_registers[reg_name] = sym_reg
+            symbolic_registers[reg_name] = (byte_len, sym_reg)
             setattr(state.regs, reg_name, sym_reg)
         else:
             setattr(state.regs, reg_name, int(str(value), 0))
+
+    symbols = {
+        "stdin": (args.stdin_bytes, symbolic_stdin),
+        "argv": symbolic_argv,
+        "memory": symbolic_memory,
+        "registers": symbolic_registers,
+    }
+    return project, state, symbols, target_addr, avoid
+
+
+def run_explorer(project, state, target_addr: int, avoid: list[int], max_steps: int):
+    import angr
 
     simgr = project.factory.simulation_manager(state)
     explorer_kwargs = {"find": target_addr}
@@ -168,10 +220,105 @@ def run_symbolic_find(args: argparse.Namespace) -> int:
         explorer_kwargs["avoid"] = avoid
     simgr.use_technique(angr.exploration_techniques.Explorer(**explorer_kwargs))
 
-    if args.max_steps > 0:
-        simgr.run(n=args.max_steps)
+    if max_steps > 0:
+        simgr.run(n=max_steps)
     else:
         simgr.run()
+    return simgr
+
+
+def describe_symbolic_solution(found, symbols) -> list[str]:
+    lines = []
+    stdin_len, symbolic_stdin = symbols["stdin"]
+    if symbolic_stdin is not None:
+        lines.append(f"stdin = {found.solver.eval(symbolic_stdin, cast_to=bytes)!r}")
+    for index, _length, sym_arg in symbols["argv"]:
+        lines.append(f"argv[{index}] = {found.solver.eval(sym_arg, cast_to=bytes)!r}")
+    for mem_addr, (mem_len, sym_mem) in symbols["memory"].items():
+        lines.append(f"mem[{hex_addr(mem_addr)}:{mem_len}] = {found.solver.eval(sym_mem, cast_to=bytes)!r}")
+    for reg_name, (_byte_len, sym_reg) in symbols["registers"].items():
+        lines.append(f"reg[{reg_name}] = {found.solver.eval(sym_reg):#x}")
+    return lines
+
+
+def get_symbolic_ast(state, symbols, item: dict):
+    target_type = item.get("type")
+    if target_type == "reg":
+        reg_name = normalize_register_name(state.project, item["name"])
+        return getattr(state.regs, reg_name)
+    if target_type == "mem":
+        return state.memory.load(parse_address(str(item["address"])), int(str(item["length"]), 0))
+    if target_type == "stdin":
+        _length, symbolic_stdin = symbols["stdin"]
+        if symbolic_stdin is None:
+            raise ValueError("constraint references stdin, but stdin is not symbolic")
+        return symbolic_stdin
+    if target_type == "argv":
+        index = int(str(item["index"]), 0)
+        for arg_index, _length, sym_arg in symbols["argv"]:
+            if arg_index == index:
+                return sym_arg
+        raise ValueError(f"constraint references argv[{index}], but it is not symbolic")
+    raise ValueError(f"unsupported constraint type: {target_type!r}")
+
+
+def concrete_bvv(state, item: dict, bits: int):
+    import claripy
+
+    if "value_hex" in item:
+        raw = bytes.fromhex(str(item["value_hex"]).removeprefix("0x"))
+        return claripy.BVV(raw)
+    if "value_bytes" in item:
+        return claripy.BVV(str(item["value_bytes"]).encode())
+    if "value" not in item:
+        raise ValueError("constraint is missing value, value_hex, or value_bytes")
+    return claripy.BVV(int(str(item["value"]), 0), bits)
+
+
+def constraint_expr(state, symbols, item: dict):
+    ast = get_symbolic_ast(state, symbols, item)
+    value = concrete_bvv(state, item, ast.size())
+    op = item.get("op", "==")
+    if op in {"==", "eq"}:
+        return ast == value
+    if op in {"!=", "ne"}:
+        return ast != value
+    if op in {"<", "ult"}:
+        return ast < value
+    if op in {"<=", "ule"}:
+        return ast <= value
+    if op in {">", "ugt"}:
+        return ast > value
+    if op in {">=", "uge"}:
+        return ast >= value
+    if op == "slt":
+        return ast.SLT(value)
+    if op == "sle":
+        return ast.SLE(value)
+    if op == "sgt":
+        return ast.SGT(value)
+    if op == "sge":
+        return ast.SGE(value)
+    raise ValueError(f"unsupported constraint op: {op!r}")
+
+
+def run_check(args: argparse.Namespace) -> int:
+    import angr
+
+    print(f"python: {sys.executable}")
+    print(f"angr: {angr.__version__}")
+    if args.binary:
+        project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+        print(f"binary: {args.binary}")
+        print(f"arch: {project.arch}")
+        print(f"min_addr: {project.loader.main_object.min_addr:#x}")
+        print(f"max_addr: {project.loader.main_object.max_addr:#x}")
+    return 0
+
+
+def run_symbolic_find(args: argparse.Namespace) -> int:
+    project, state, symbols, target_addr, avoid = setup_symbolic_execution(args, args.symbolic_find)
+    simgr = run_explorer(project, state, target_addr, avoid, args.max_steps)
 
     print(f"binary: {args.binary}")
     print(f"arch: {project.arch}")
@@ -195,15 +342,214 @@ def run_symbolic_find(args: argparse.Namespace) -> int:
     for addr in found.history.bbl_addrs.hardcopy:
         print(f"  {addr:#x}")
 
-    if symbolic_stdin is not None:
-        print(f"stdin = {found.solver.eval(symbolic_stdin, cast_to=bytes)!r}")
-    for index, sym_arg in symbolic_argv:
-        print(f"argv[{index}] = {found.solver.eval(sym_arg, cast_to=bytes)!r}")
-    for mem_addr, (mem_len, sym_mem) in symbolic_memory.items():
-        print(f"mem[{mem_addr:#x}:{mem_len}] = {found.solver.eval(sym_mem, cast_to=bytes)!r}")
-    for reg_name, sym_reg in symbolic_registers.items():
-        print(f"reg[{reg_name}] = {found.solver.eval(sym_reg):#x}")
+    for line in describe_symbolic_solution(found, symbols):
+        print(line)
 
+    return 0
+
+
+def run_solve_at(args: argparse.Namespace) -> int:
+    project, state, symbols, target_addr, avoid = setup_symbolic_execution(args, args.solve_at)
+    simgr = run_explorer(project, state, target_addr, avoid, args.max_steps)
+
+    print(f"binary: {args.binary}")
+    print(f"arch: {project.arch}")
+    print(f"target: {target_addr:#x}")
+    print(f"max_steps: {args.max_steps}")
+
+    if not simgr.found:
+        print("found: false")
+        print(f"active_states: {len(simgr.active)}")
+        print(f"deadended_states: {len(simgr.deadended)}")
+        print(f"avoid_states: {len(simgr.avoid)}")
+        return 2
+
+    found = simgr.found[0]
+    print("found: true")
+
+    if not args.constraints_json:
+        parsed_constraints = []
+    else:
+        decoded_constraints = json.loads(args.constraints_json)
+        if isinstance(decoded_constraints, dict):
+            parsed_constraints = decoded_constraints.get("constraints", [])
+        else:
+            parsed_constraints = decoded_constraints
+    if not isinstance(parsed_constraints, list):
+        raise ValueError("constraints_json constraints must be a list")
+
+    for item in parsed_constraints:
+        if not isinstance(item, dict):
+            raise ValueError("each constraint must be a JSON object")
+        found.add_constraints(constraint_expr(found, symbols, item))
+
+    satisfiable = found.solver.satisfiable()
+    print(f"satisfiable: {str(satisfiable).lower()}")
+    if not satisfiable:
+        return 3
+
+    for line in describe_symbolic_solution(found, symbols):
+        print(line)
+
+    eval_registers = parse_csv_strings(args.eval_registers)
+    for reg_name in eval_registers:
+        reg_name = normalize_register_name(project, reg_name)
+        print(f"eval_reg[{reg_name}] = {found.solver.eval(getattr(found.regs, reg_name)):#x}")
+
+    for addr, length in parse_json_map(args.eval_memory_json, "eval_memory_json").items():
+        mem_addr = parse_address(str(addr))
+        mem_len = int(str(length), 0)
+        value = found.solver.eval(found.memory.load(mem_addr, mem_len), cast_to=bytes)
+        print(f"eval_mem[{hex_addr(mem_addr)}:{mem_len}] = {value!r}")
+
+    if args.eval_stdin_bytes > 0:
+        stdin_len, symbolic_stdin = symbols["stdin"]
+        if symbolic_stdin is None:
+            print("eval_stdin = <stdin is not symbolic>")
+        else:
+            byte_len = min(stdin_len, args.eval_stdin_bytes)
+            print(f"eval_stdin[{byte_len}] = {found.solver.eval(symbolic_stdin, cast_to=bytes)[:byte_len]!r}")
+
+    return 0
+
+
+def run_reachability(args: argparse.Namespace) -> int:
+    source = parse_address(args.reachability_from)
+    target = parse_address(args.reachability_to)
+    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+    cfg = build_cfg(project, args, function_starts=[source])
+    source_node = get_cfg_node(cfg, source)
+    target_node = get_cfg_node(cfg, target)
+
+    print(f"binary: {args.binary}")
+    print(f"arch: {project.arch}")
+    print(f"source: {source:#x}")
+    print(f"target: {target:#x}")
+    print(f"cfg_nodes: {cfg.graph.number_of_nodes()}")
+    print(f"cfg_edges: {cfg.graph.number_of_edges()}")
+
+    if source_node is None:
+        print("reachable: false")
+        print("reason: source node not found")
+        return 2
+    if target_node is None:
+        print("reachable: false")
+        print("reason: target node not found")
+        return 2
+
+    queue = [source_node]
+    predecessor = {source_node: None}
+    while queue:
+        node = queue.pop(0)
+        if node == target_node:
+            break
+        for successor in cfg.graph.successors(node):
+            if successor not in predecessor:
+                predecessor[successor] = node
+                queue.append(successor)
+
+    if target_node not in predecessor:
+        print("reachable: false")
+        return 0
+
+    path = []
+    node = target_node
+    while node is not None:
+        path.append(node)
+        node = predecessor[node]
+    path.reverse()
+
+    print("reachable: true")
+    print(f"path_length: {len(path)}")
+    if args.include_path:
+        print("path:")
+        for node in path[: args.summary_limit]:
+            print(f"  {node.addr:#x}")
+        if len(path) > args.summary_limit:
+            print(f"  ... {len(path) - args.summary_limit} more nodes")
+    return 0
+
+
+def run_cfg_summary(args: argparse.Namespace) -> int:
+    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+    function_addr = parse_address(args.function_address) if args.function_address else None
+    cfg = build_cfg(project, args, function_starts=[function_addr] if function_addr is not None else None)
+
+    print(f"binary: {args.binary}")
+    print(f"arch: {project.arch}")
+    print(f"cfg_nodes: {cfg.graph.number_of_nodes()}")
+    print(f"cfg_edges: {cfg.graph.number_of_edges()}")
+    print(f"functions: {len(project.kb.functions)}")
+
+    if function_addr is not None:
+        func = project.kb.functions.get_by_addr(function_addr)
+        if func is None:
+            print(f"function: not found @ {function_addr:#x}")
+            return 2
+        print(f"function: {func.name} @ {func.addr:#x}")
+        block_addrs = sorted(func.block_addrs_set)
+        print(f"blocks: {len(block_addrs)}")
+        print("block_addresses:")
+        for addr in block_addrs[: args.summary_limit]:
+            print(f"  {addr:#x}")
+        if len(block_addrs) > args.summary_limit:
+            print(f"  ... {len(block_addrs) - args.summary_limit} more blocks")
+        call_sites = list(func.get_call_sites())
+        print(f"call_sites: {len(call_sites)}")
+        for site in call_sites[: args.summary_limit]:
+            target = func.get_call_target(site)
+            print(f"  {site:#x} -> {function_label(project, target)}")
+        return 0
+
+    print("functions_sample:")
+    for func in list(project.kb.functions.values())[: args.summary_limit]:
+        print(f"  {func.addr:#x} {func.name} blocks={len(func.block_addrs_set)}")
+    return 0
+
+
+def run_callgraph_summary(args: argparse.Namespace) -> int:
+    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+    build_cfg(project, args)
+    callgraph = project.kb.functions.callgraph
+    print(f"binary: {args.binary}")
+    print(f"arch: {project.arch}")
+    print(f"functions: {callgraph.number_of_nodes()}")
+    print(f"calls: {callgraph.number_of_edges()}")
+
+    edges = list(callgraph.edges())
+    print("edges:")
+    for src, dst in edges[: args.summary_limit]:
+        print(f"  {function_label(project, src)} -> {function_label(project, dst)}")
+    if len(edges) > args.summary_limit:
+        print(f"  ... {len(edges) - args.summary_limit} more edges")
+    return 0
+
+
+def run_lift_block(args: argparse.Namespace) -> int:
+    from angr import ailment
+    from angr.ailment.manager import Manager
+
+    address = parse_address(args.lift_block)
+    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+    block = make_block(project, address, args.block_size, args.num_inst)
+
+    print(f"binary: {args.binary}")
+    print(f"arch: {project.arch}")
+    print(f"block: {address:#x}")
+    print(f"size: {block.size}")
+    print(f"instruction_addresses: {', '.join(hex_addr(addr) for addr in block.instruction_addrs)}")
+
+    if args.lift_format in {"vex", "both"}:
+        print()
+        print("VEX:")
+        print(block.vex)
+
+    if args.lift_format in {"ail", "both"}:
+        print()
+        print("AIL:")
+        manager = Manager(arch=project.arch)
+        ail_block = ailment.IRSBConverter.convert(block.vex, manager)
+        print(ail_block.dbg_repr().rstrip())
     return 0
 
 
@@ -276,6 +622,23 @@ def main() -> int:
     parser.add_argument("--memory-json", default="", help="JSON object mapping address to concrete integer/hex value")
     parser.add_argument("--registers-json", default="", help='JSON object mapping register names to values or "svN" symbolic byte lengths')
     parser.add_argument("--max-steps", type=int, default=10000, help="Maximum symbolic execution steps, or 0 for unbounded")
+    parser.add_argument("--solve-at", help="Find an address and solve/evaluate requested constraints there")
+    parser.add_argument("--constraints-json", default="", help="JSON list of constraints, or object with a constraints list")
+    parser.add_argument("--eval-registers", default="", help="Comma-separated register names to evaluate after solve-at")
+    parser.add_argument("--eval-memory-json", default="", help="JSON object mapping address to byte length to evaluate after solve-at")
+    parser.add_argument("--eval-stdin-bytes", type=int, default=0, help="Evaluate this many symbolic stdin bytes after solve-at")
+    parser.add_argument("--reachability-from", help="Source address for static CFG reachability")
+    parser.add_argument("--reachability-to", help="Target address for static CFG reachability")
+    parser.add_argument("--cfg-summary", action="store_true", help="Summarize angr CFGFast output")
+    parser.add_argument("--callgraph-summary", action="store_true", help="Summarize angr's recovered callgraph")
+    parser.add_argument("--function-address", default="", help="Optional function address for CFG summaries")
+    parser.add_argument("--complete-cfg", action="store_true", help="Force complete CFG scan instead of targeted/default scan")
+    parser.add_argument("--summary-limit", type=int, default=50, help="Maximum items to print in summaries")
+    parser.add_argument("--include-path", action="store_true", help="Include a static reachability path when found")
+    parser.add_argument("--lift-block", help="Lift a basic block at this address")
+    parser.add_argument("--lift-format", choices=["vex", "ail", "both"], default="both", help="IR format to print for --lift-block")
+    parser.add_argument("--block-size", type=int, default=0, help="Optional block size for lifting")
+    parser.add_argument("--num-inst", type=int, default=0, help="Optional instruction count for lifting")
     rust_group = parser.add_mutually_exclusive_group()
     rust_group.add_argument("--rust", dest="rust", action="store_true", default=True)
     rust_group.add_argument("--no-rust", dest="rust", action="store_false")
@@ -294,6 +657,31 @@ def main() -> int:
         if not args.binary:
             parser.error("--binary is required with --symbolic-find")
         return run_symbolic_find(args)
+
+    if args.solve_at:
+        if not args.binary:
+            parser.error("--binary is required with --solve-at")
+        return run_solve_at(args)
+
+    if args.reachability_from or args.reachability_to:
+        if not args.binary or not args.reachability_from or not args.reachability_to:
+            parser.error("--binary, --reachability-from, and --reachability-to are required together")
+        return run_reachability(args)
+
+    if args.cfg_summary:
+        if not args.binary:
+            parser.error("--binary is required with --cfg-summary")
+        return run_cfg_summary(args)
+
+    if args.callgraph_summary:
+        if not args.binary:
+            parser.error("--binary is required with --callgraph-summary")
+        return run_callgraph_summary(args)
+
+    if args.lift_block:
+        if not args.binary:
+            parser.error("--binary is required with --lift-block")
+        return run_lift_block(args)
 
     if not args.binary or not args.address:
         parser.error("--binary and --address are required unless --check is used")
