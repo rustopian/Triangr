@@ -165,37 +165,16 @@ def run_angr_helper(args: list[str], timeout: int) -> str:
     helper = os.environ.get("GHIDRA_MCP_ANGR_HELPER", DEFAULT_ANGR_HELPER)
     python = os.environ.get("GHIDRA_MCP_ANGR_PYTHON", default_angr_python())
     cmd = [python, helper, *args]
-    effective_timeout = max(1, min(timeout, TIMEOUT_DECOMPILE_MAX))
-    try:
-        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stdout_file, \
-                tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
-            completed = subprocess.run(
-                cmd,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                timeout=effective_timeout,
-                check=False,
-            )
-            output, output_truncated = read_limited_stream(stdout_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
-            errors, errors_truncated = read_limited_stream(stderr_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
-    except FileNotFoundError as e:
-        return f"Failed to start angr helper: {e}"
-    except subprocess.TimeoutExpired:
-        return f"angr helper timed out after {effective_timeout} seconds"
-
-    errors = errors.strip()
-    output = output.strip()
-    if output_truncated:
-        output += truncation_note("angr stdout", ANGR_HELPER_OUTPUT_MAX_CHARS)
-    if errors_truncated:
-        errors += truncation_note("angr stderr", ANGR_HELPER_OUTPUT_MAX_CHARS)
-    if completed.returncode == 0:
+    returncode, output, errors, error = run_limited_subprocess(cmd, "angr helper", timeout)
+    if error:
+        return error
+    if returncode == 0:
         return output if output else "(angr returned no output)"
 
     details = output
     if errors:
         details = f"{details}\n\nstderr:\n{errors}" if details else f"stderr:\n{errors}"
-    return f"angr helper failed with exit code {completed.returncode}\n\n{details}".strip()
+    return f"angr helper failed with exit code {returncode}\n\n{details}".strip()
 
 def find_angryghidra_script() -> str:
     candidates = [
@@ -247,6 +226,33 @@ def read_limited_stream(stream, limit: int) -> tuple[str, bool]:
 
 def truncation_note(label: str, limit: int) -> str:
     return f"\n\n[{label} truncated after {limit} characters]"
+
+def run_limited_subprocess(cmd: list[str], label: str, timeout: int) -> tuple[int | None, str, str, str]:
+    effective_timeout = max(1, min(timeout, TIMEOUT_DECOMPILE_MAX))
+    try:
+        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stdout_file, \
+                tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
+            completed = subprocess.run(
+                cmd,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                timeout=effective_timeout,
+                check=False,
+            )
+            output, output_truncated = read_limited_stream(stdout_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
+            errors, errors_truncated = read_limited_stream(stderr_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
+    except FileNotFoundError as e:
+        return None, "", "", f"Failed to start {label}: {e}"
+    except subprocess.TimeoutExpired:
+        return None, "", "", f"{label} timed out after {effective_timeout} seconds"
+
+    output = output.strip()
+    errors = errors.strip()
+    if output_truncated:
+        output += truncation_note(f"{label} stdout", ANGR_HELPER_OUTPUT_MAX_CHARS)
+    if errors_truncated:
+        errors += truncation_note(f"{label} stderr", ANGR_HELPER_OUTPUT_MAX_CHARS)
+    return completed.returncode, output, errors, ""
 
 def parse_capped_csv_ints(value: str, field_name: str, max_items: int, max_value: int) -> tuple[list[int], str]:
     if not value:
@@ -553,26 +559,15 @@ def run_angryghidra_options(options: dict, timeout: int) -> str:
 
     python = os.environ.get("ANGRYGHIDRA_PYTHON") or os.environ.get("GHIDRA_MCP_ANGR_PYTHON") or default_angr_python()
     options_path = ""
-    effective_timeout = max(1, min(timeout, TIMEOUT_DECOMPILE_MAX))
     try:
         with tempfile.NamedTemporaryFile("w", suffix="-angryghidra.json", delete=False) as options_file:
             json.dump(options, options_file)
             options_path = options_file.name
-        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stdout_file, \
-                tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
-            completed = subprocess.run(
-                [python, script, options_path],
-                stdout=stdout_file,
-                stderr=stderr_file,
-                timeout=effective_timeout,
-                check=False,
-            )
-            output, output_truncated = read_limited_stream(stdout_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
-            errors, errors_truncated = read_limited_stream(stderr_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
-    except FileNotFoundError as e:
-        return f"Failed to start AngryGhidra: {e}"
-    except subprocess.TimeoutExpired:
-        return f"AngryGhidra timed out after {effective_timeout} seconds"
+        returncode, output, errors, error = run_limited_subprocess(
+            [python, script, options_path],
+            "AngryGhidra",
+            timeout,
+        )
     finally:
         if options_path:
             try:
@@ -580,19 +575,15 @@ def run_angryghidra_options(options: dict, timeout: int) -> str:
             except OSError:
                 pass
 
-    output = output.strip()
-    errors = errors.strip()
-    if output_truncated:
-        output += truncation_note("AngryGhidra stdout", ANGR_HELPER_OUTPUT_MAX_CHARS)
-    if errors_truncated:
-        errors += truncation_note("AngryGhidra stderr", ANGR_HELPER_OUTPUT_MAX_CHARS)
-    if completed.returncode == 0:
+    if error:
+        return error
+    if returncode == 0:
         return output if output else "(AngryGhidra returned no solution)"
 
     details = output
     if errors:
         details = f"{details}\n\nstderr:\n{errors}" if details else f"stderr:\n{errors}"
-    return f"AngryGhidra failed with exit code {completed.returncode}\n\n{details}".strip()
+    return f"AngryGhidra failed with exit code {returncode}\n\n{details}".strip()
 
 def build_angryghidra_symbolic_options(
     find_address: str,
