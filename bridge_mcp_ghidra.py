@@ -32,6 +32,14 @@ DEFAULT_ANGRYGHIDRA_SCRIPT = os.path.join(
     "angryghidra_script",
     "angryghidra.py",
 )
+DEFAULT_TRIANGR_HOME = os.path.expanduser("~/.local/share/triangr")
+DEFAULT_TRIANGR_ANGR_PYTHON = os.path.join(DEFAULT_TRIANGR_HOME, "venv", "bin", "python")
+DEFAULT_TRIANGR_ANGRYGHIDRA_SCRIPT = os.path.join(
+    DEFAULT_TRIANGR_HOME,
+    "AngryGhidra",
+    "angryghidra_script",
+    "angryghidra.py",
+)
 PARENT_ANGRYGHIDRA_SCRIPT = os.path.join(
     os.path.dirname(BRIDGE_DIR),
     "AngryGhidra",
@@ -167,10 +175,14 @@ def parse_key_value_lines(lines: list) -> dict:
 
 def default_angr_python() -> str:
     candidates = [
+        DEFAULT_TRIANGR_ANGR_PYTHON,
         os.path.join(BRIDGE_DIR, ".venv", "bin", "python"),
         os.path.join(BRIDGE_DIR, "GhidraMCP-fork", ".venv", "bin", "python"),
         sys.executable,
     ]
+    triangr_home = os.environ.get("TRIANGR_HOME")
+    if triangr_home:
+        candidates.insert(0, os.path.join(triangr_home, "venv", "bin", "python"))
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return candidate
@@ -216,9 +228,18 @@ def find_angryghidra_script() -> str:
     candidates = [
         os.environ.get("ANGRYGHIDRA_SCRIPT", ""),
         os.path.join(os.environ.get("ANGRYGHIDRA_HOME", ""), "angryghidra_script", "angryghidra.py"),
+        DEFAULT_TRIANGR_ANGRYGHIDRA_SCRIPT,
         DEFAULT_ANGRYGHIDRA_SCRIPT,
         PARENT_ANGRYGHIDRA_SCRIPT,
     ]
+    triangr_home = os.environ.get("TRIANGR_HOME")
+    if triangr_home:
+        candidates.insert(2, os.path.join(
+            triangr_home,
+            "AngryGhidra",
+            "angryghidra_script",
+            "angryghidra.py",
+        ))
     candidates.extend(glob.glob(os.path.expanduser(
         "~/Library/ghidra/*/Extensions/AngryGhidra/angryghidra_script/angryghidra.py"
     )))
