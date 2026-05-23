@@ -44,6 +44,8 @@ mvnw.cmd
 # Environment files
 .env
 .env.*
+.venv/
+.angr-cache/
 
 # Python things
 .venv
@@ -65,4 +67,3 @@ tests/__pycache__/
 
 # Gradle test output
 tests/build/
-

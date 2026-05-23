@@ -311,6 +311,10 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, getCurrentFunction());
         });
 
+        server.createContext("/program_info", exchange -> {
+            sendResponse(exchange, getProgramInfo());
+        });
+
         server.createContext("/list_functions", exchange -> {
             sendResponse(exchange, listFunctions());
         });
@@ -1209,6 +1213,29 @@ public class GhidraMCPPlugin extends Plugin {
             func.getName(),
             func.getEntryPoint(),
             func.getSignature());
+    }
+
+    /**
+     * Get metadata for the currently loaded program.
+     */
+    private String getProgramInfo() {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        StringBuilder result = new StringBuilder();
+        result.append("name: ").append(program.getName()).append("\n");
+        result.append("executable_path: ").append(program.getExecutablePath()).append("\n");
+        result.append("executable_format: ").append(program.getExecutableFormat()).append("\n");
+        result.append("language_id: ").append(program.getLanguageID().getIdAsString()).append("\n");
+        result.append("compiler_spec_id: ").append(program.getCompilerSpec().getCompilerSpecID()).append("\n");
+        result.append("image_base: ").append(formatAddressOffset(program.getImageBase())).append("\n");
+        result.append("min_address: ").append(formatAddressOffset(program.getMinAddress())).append("\n");
+        result.append("max_address: ").append(formatAddressOffset(program.getMaxAddress()));
+        return result.toString();
+    }
+
+    private String formatAddressOffset(Address address) {
+        return "0x" + Long.toUnsignedString(address.getOffset(), 16);
     }
 
     /**

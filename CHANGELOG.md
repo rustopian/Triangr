@@ -8,6 +8,29 @@ This is a fork of [LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraM
 The "Unreleased" section accumulates changes since the upstream `v1-4` release
 (commit `27f316f`).
 
+## [1.6.0] - 2026-05-23
+
+### Added
+- **Optional angr/Oxidizer bridge support**: `angr_decompile_function` and
+  `angr_check_setup` MCP tools call a packaged `angr_decompile.py` helper.
+  The helper supports angr's Rust-oriented decompiler path and can load
+  Solana/eBPF ELFs through angr's p-code engine.
+- **Core angr symbolic path finding**: `angr_symbolic_find` can search for a
+  path to a target branch/address, avoid addresses, and solve symbolic
+  stdin/argv, memory regions, and registers without requiring AngryGhidra.
+- **Optional AngryGhidra bridge support**: `angryghidra_check_setup` and
+  `angryghidra_symbolic_execute` discover a local AngryGhidra install when
+  present, but return a clear configuration error when it is absent. Existing
+  Ghidra MCP tools do not require AngryGhidra.
+- **`/program_info` Java endpoint and `get_program_info` MCP tool**: exposes
+  current-program metadata such as executable path, language id, compiler spec,
+  image base, and address range so optional external analyzers can default to
+  the active Ghidra program.
+
+### Changed
+- The Python package now includes `angr_decompile.py` and exposes an optional
+  `angr` extra instead of making angr a hard dependency for normal bridge use.
+
 ## [1.5.1] - 2026-05-21
 
 Hardening pass driven by a post-merge review of every PR landed in 1.5.0,

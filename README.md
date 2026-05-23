@@ -36,6 +36,29 @@ MCP Server + Ghidra Plugin
 - Python3
 - MCP [SDK](https://github.com/modelcontextprotocol/python-sdk)
 
+## Optional angr / AngryGhidra
+This fork can expose angr/Oxidizer decompilation and AngryGhidra symbolic
+execution without making either one a hard dependency for the normal Ghidra MCP
+tools.
+
+- Install Python dependencies into an isolated environment:
+  `python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`
+- `angr_decompile_function` uses `GHIDRA_MCP_ANGR_PYTHON` when set. Otherwise it
+  tries `.venv/bin/python`, then a sibling `GhidraMCP-fork/.venv/bin/python`,
+  then the interpreter running the MCP bridge.
+- For Solana/eBPF ELFs, pass `pcode_language="eBPF:LE:64:default"` or let the
+  bridge infer it from Ghidra's program language id. The helper patches CLE at
+  runtime for Solana's e_machine 263 and uses angr's p-code engine.
+- `angr_symbolic_find` exposes core angr path search without AngryGhidra. It can
+  find a path to a target address, avoid addresses, and solve symbolic
+  stdin/argv, memory, and register values.
+- AngryGhidra support is optional. `angryghidra_*` tools look for
+  `ANGRYGHIDRA_SCRIPT`, `ANGRYGHIDRA_HOME/angryghidra_script/angryghidra.py`,
+  or a sibling `AngryGhidra/angryghidra_script/angryghidra.py`. If none is
+  found, they return a clear error and all other tools continue to work.
+- If launching AngryGhidra inside Ghidra, set `ANGRYGHIDRA_PYTHON` to the same
+  venv Python so its script uses the installed angr package.
+
 ## Ghidra
 First, download the latest [release](https://github.com/LaurieWired/GhidraMCP/releases) from this repository. This contains the Ghidra plugin and Python MCP client. Then, you can directly import the plugin into Ghidra.
 
