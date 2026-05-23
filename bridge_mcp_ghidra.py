@@ -49,6 +49,22 @@ _http_client = None
 
 # Configurable timeouts (in seconds)
 TIMEOUT_DECOMPILE_MAX = 1800  # Maximum decompilation timeout (30 minutes)
+ANGR_HELPER_OUTPUT_MAX_CHARS = 200_000
+ANGR_JSON_INPUT_MAX_CHARS = 100_000
+ANGR_OPTIONS_JSON_MAX_CHARS = 100_000
+ANGR_MAX_SYMBOLIC_BYTES = 4096
+ANGR_MAX_TOTAL_SYMBOLIC_BYTES = 16_384
+ANGR_MAX_SYMBOLIC_ARGS = 16
+ANGR_MAX_SYMBOLIC_REGIONS = 64
+ANGR_MAX_SYMBOLIC_REGISTER_BYTES = 64
+ANGR_MAX_HOOKS = 64
+ANGR_MAX_STEPS = 100_000
+ANGR_MAX_SUMMARY_LIMIT = 500
+ANGR_MAX_BLOCK_SIZE = 4096
+ANGR_MAX_NUM_INST = 256
+ANGR_MAX_COMPARE_FUNCTIONS = 25
+ANGR_MAX_COMMENTS = 100
+ANGR_MAX_COMMENT_PREFIX_CHARS = 200
 
 def get_http_client():
     global _http_client
@@ -149,21 +165,30 @@ def run_angr_helper(args: list[str], timeout: int) -> str:
     helper = os.environ.get("GHIDRA_MCP_ANGR_HELPER", DEFAULT_ANGR_HELPER)
     python = os.environ.get("GHIDRA_MCP_ANGR_PYTHON", default_angr_python())
     cmd = [python, helper, *args]
+    effective_timeout = max(1, min(timeout, TIMEOUT_DECOMPILE_MAX))
     try:
-        completed = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stdout_file, \
+                tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
+            completed = subprocess.run(
+                cmd,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                timeout=effective_timeout,
+                check=False,
+            )
+            output, output_truncated = read_limited_stream(stdout_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
+            errors, errors_truncated = read_limited_stream(stderr_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
     except FileNotFoundError as e:
         return f"Failed to start angr helper: {e}"
     except subprocess.TimeoutExpired:
-        return f"angr helper timed out after {timeout} seconds"
+        return f"angr helper timed out after {effective_timeout} seconds"
 
-    output = completed.stdout.strip()
-    errors = completed.stderr.strip()
+    errors = errors.strip()
+    output = output.strip()
+    if output_truncated:
+        output += truncation_note("angr stdout", ANGR_HELPER_OUTPUT_MAX_CHARS)
+    if errors_truncated:
+        errors += truncation_note("angr stderr", ANGR_HELPER_OUTPUT_MAX_CHARS)
     if completed.returncode == 0:
         return output if output else "(angr returned no output)"
 
@@ -197,10 +222,265 @@ def angryghidra_missing_message() -> str:
 def parse_optional_json(value: str, field_name: str):
     if not value:
         return None
+    if len(value) > ANGR_JSON_INPUT_MAX_CHARS:
+        raise ValueError(f"{field_name} exceeds {ANGR_JSON_INPUT_MAX_CHARS} characters")
     try:
         return json.loads(value)
     except json.JSONDecodeError as e:
         raise ValueError(f"{field_name} must be valid JSON: {e}") from e
+
+def bounded_int(value: int, field_name: str, minimum: int, maximum: int) -> tuple[int, str]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return minimum, f"{field_name} must be an integer"
+    if parsed < minimum or parsed > maximum:
+        return parsed, f"{field_name} must be between {minimum} and {maximum}"
+    return parsed, ""
+
+def read_limited_stream(stream, limit: int) -> tuple[str, bool]:
+    stream.seek(0)
+    text = stream.read(limit + 1)
+    if len(text) > limit:
+        return text[:limit], True
+    return text, False
+
+def truncation_note(label: str, limit: int) -> str:
+    return f"\n\n[{label} truncated after {limit} characters]"
+
+def parse_capped_csv_ints(value: str, field_name: str, max_items: int, max_value: int) -> tuple[list[int], str]:
+    if not value:
+        return [], ""
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if len(parts) > max_items:
+        return [], f"{field_name} may contain at most {max_items} entries"
+    result = []
+    for part in parts:
+        try:
+            parsed = int(part, 0)
+        except ValueError:
+            return [], f"{field_name} entry {part!r} is not an integer"
+        if parsed < 1 or parsed > max_value:
+            return [], f"{field_name} entries must be between 1 and {max_value}"
+        result.append(parsed)
+    return result, ""
+
+def parse_capped_json_map(value: str, field_name: str, max_items: int) -> tuple[dict, str]:
+    try:
+        parsed = parse_optional_json(value, field_name)
+    except ValueError as e:
+        return {}, str(e)
+    if parsed is None:
+        return {}, ""
+    if not isinstance(parsed, dict):
+        return {}, f"{field_name} must be a JSON object"
+    if len(parsed) > max_items:
+        return {}, f"{field_name} may contain at most {max_items} entries"
+    return parsed, ""
+
+def symbolic_length(value, field_name: str, max_value: int = ANGR_MAX_SYMBOLIC_BYTES) -> tuple[int, str]:
+    try:
+        parsed = int(str(value), 0)
+    except ValueError:
+        return 0, f"{field_name} must be an integer byte length"
+    if parsed < 1 or parsed > max_value:
+        return parsed, f"{field_name} must be between 1 and {max_value} bytes"
+    return parsed, ""
+
+def validate_symbolic_input_caps(
+    stdin_bytes: int = 0,
+    argv_bytes: str = "",
+    symbolic_memory_json: str = "",
+    memory_json: str = "",
+    registers_json: str = "",
+) -> str:
+    if stdin_bytes:
+        _stdin_bytes, error = bounded_int(stdin_bytes, "stdin_bytes", 0, ANGR_MAX_SYMBOLIC_BYTES)
+        if error:
+            return error
+    argv_lengths, error = parse_capped_csv_ints(
+        argv_bytes,
+        "argv_bytes",
+        ANGR_MAX_SYMBOLIC_ARGS,
+        ANGR_MAX_SYMBOLIC_BYTES,
+    )
+    if error:
+        return error
+    total_symbolic = sum(argv_lengths) + max(0, int(stdin_bytes or 0))
+
+    symbolic_memory, error = parse_capped_json_map(
+        symbolic_memory_json,
+        "symbolic_memory_json",
+        ANGR_MAX_SYMBOLIC_REGIONS,
+    )
+    if error:
+        return error
+    for addr, length in symbolic_memory.items():
+        byte_len, error = symbolic_length(length, f"symbolic_memory_json[{addr!r}]")
+        if error:
+            return error
+        total_symbolic += byte_len
+
+    memory, error = parse_capped_json_map(
+        memory_json,
+        "memory_json",
+        ANGR_MAX_SYMBOLIC_REGIONS,
+    )
+    if error:
+        return error
+    for addr, value in memory.items():
+        try:
+            concrete = int(str(value), 0)
+        except ValueError:
+            return f"memory_json[{addr!r}] must be an integer or hex string"
+        if concrete < 0:
+            return f"memory_json[{addr!r}] must be non-negative"
+        byte_len = max(1, (concrete.bit_length() + 7) // 8)
+        if byte_len > ANGR_MAX_SYMBOLIC_BYTES:
+            return f"memory_json[{addr!r}] may contain at most {ANGR_MAX_SYMBOLIC_BYTES} bytes"
+
+    registers, error = parse_capped_json_map(
+        registers_json,
+        "registers_json",
+        ANGR_MAX_SYMBOLIC_REGIONS,
+    )
+    if error:
+        return error
+    for reg_name, value in registers.items():
+        if isinstance(value, str) and value.startswith("sv"):
+            byte_len, error = symbolic_length(
+                value[2:],
+                f"registers_json[{reg_name!r}]",
+                ANGR_MAX_SYMBOLIC_REGISTER_BYTES,
+            )
+            if error:
+                return error
+            total_symbolic += byte_len
+
+    if total_symbolic > ANGR_MAX_TOTAL_SYMBOLIC_BYTES:
+        return f"total symbolic input may not exceed {ANGR_MAX_TOTAL_SYMBOLIC_BYTES} bytes"
+    return ""
+
+def validate_solver_caps(
+    constraints_json: str = "",
+    eval_memory_json: str = "",
+    eval_stdin_bytes: int = 0,
+) -> str:
+    try:
+        constraints = parse_optional_json(constraints_json, "constraints_json")
+    except ValueError as e:
+        return str(e)
+    if isinstance(constraints, dict):
+        constraints = constraints.get("constraints", [])
+    if constraints is None:
+        constraints = []
+    if not isinstance(constraints, list):
+        return "constraints_json constraints must be a list"
+    if len(constraints) > ANGR_MAX_SYMBOLIC_REGIONS * 2:
+        return f"constraints_json may contain at most {ANGR_MAX_SYMBOLIC_REGIONS * 2} entries"
+
+    eval_memory, error = parse_capped_json_map(
+        eval_memory_json,
+        "eval_memory_json",
+        ANGR_MAX_SYMBOLIC_REGIONS,
+    )
+    if error:
+        return error
+    for addr, length in eval_memory.items():
+        _byte_len, error = symbolic_length(length, f"eval_memory_json[{addr!r}]")
+        if error:
+            return error
+
+    if eval_stdin_bytes:
+        _eval_stdin_bytes, error = bounded_int(
+            eval_stdin_bytes,
+            "eval_stdin_bytes",
+            0,
+            ANGR_MAX_SYMBOLIC_BYTES,
+        )
+        if error:
+            return error
+    return ""
+
+def validate_angryghidra_options(options: dict) -> str:
+    encoded = json.dumps(options)
+    if len(encoded) > ANGR_OPTIONS_JSON_MAX_CHARS:
+        return f"AngryGhidra options exceed {ANGR_OPTIONS_JSON_MAX_CHARS} characters"
+
+    arguments = options.get("arguments", {})
+    if arguments and not isinstance(arguments, dict):
+        return "AngryGhidra arguments must be a JSON object"
+    if len(arguments) > ANGR_MAX_SYMBOLIC_ARGS:
+        return f"AngryGhidra arguments may contain at most {ANGR_MAX_SYMBOLIC_ARGS} entries"
+    total_symbolic = 0
+    for key, value in arguments.items():
+        byte_len, error = symbolic_length(value, f"arguments[{key!r}]")
+        if error:
+            return error
+        total_symbolic += byte_len
+
+    vectors = options.get("vectors", {})
+    if vectors and not isinstance(vectors, dict):
+        return "AngryGhidra vectors must be a JSON object"
+    if len(vectors) > ANGR_MAX_SYMBOLIC_REGIONS:
+        return f"AngryGhidra vectors may contain at most {ANGR_MAX_SYMBOLIC_REGIONS} entries"
+    for addr, length in vectors.items():
+        byte_len, error = symbolic_length(length, f"vectors[{addr!r}]")
+        if error:
+            return error
+        total_symbolic += byte_len
+
+    mem_store = options.get("mem_store", {})
+    if mem_store and not isinstance(mem_store, dict):
+        return "AngryGhidra mem_store must be a JSON object"
+    if len(mem_store) > ANGR_MAX_SYMBOLIC_REGIONS:
+        return f"AngryGhidra mem_store may contain at most {ANGR_MAX_SYMBOLIC_REGIONS} entries"
+    for addr, value in mem_store.items():
+        text_value = str(value)
+        if len(text_value.removeprefix("0x")) > ANGR_MAX_SYMBOLIC_BYTES * 2:
+            return f"mem_store[{addr!r}] may contain at most {ANGR_MAX_SYMBOLIC_BYTES} bytes"
+
+    regs_vals = options.get("regs_vals", {})
+    if regs_vals and not isinstance(regs_vals, dict):
+        return "AngryGhidra regs_vals must be a JSON object"
+    if len(regs_vals) > ANGR_MAX_SYMBOLIC_REGIONS:
+        return f"AngryGhidra regs_vals may contain at most {ANGR_MAX_SYMBOLIC_REGIONS} entries"
+    for reg_name, value in regs_vals.items():
+        if isinstance(value, str) and value.startswith("sv"):
+            byte_len, error = symbolic_length(
+                value[2:],
+                f"regs_vals[{reg_name!r}]",
+                ANGR_MAX_SYMBOLIC_REGISTER_BYTES,
+            )
+            if error:
+                return error
+            total_symbolic += byte_len
+
+    hooks = options.get("hooks", [])
+    if hooks and not isinstance(hooks, list):
+        return "AngryGhidra hooks must be a JSON array"
+    if len(hooks) > ANGR_MAX_HOOKS:
+        return f"AngryGhidra hooks may contain at most {ANGR_MAX_HOOKS} entries"
+    for index, hook in enumerate(hooks):
+        if not isinstance(hook, dict):
+            return f"AngryGhidra hooks[{index}] must be a JSON object"
+        for _address, register_updates in hook.items():
+            if not isinstance(register_updates, dict):
+                return f"AngryGhidra hooks[{index}] values must be JSON objects"
+            for reg_name, value in register_updates.items():
+                if isinstance(value, str) and value.startswith("sv"):
+                    byte_len, error = symbolic_length(
+                        value[2:],
+                        f"hooks[{index}][{reg_name!r}]",
+                        ANGR_MAX_SYMBOLIC_REGISTER_BYTES,
+                    )
+                    if error:
+                        return error
+                    total_symbolic += byte_len
+
+    if total_symbolic > ANGR_MAX_TOTAL_SYMBOLIC_BYTES:
+        return f"total AngryGhidra symbolic input may not exceed {ANGR_MAX_TOTAL_SYMBOLIC_BYTES} bytes"
+    return ""
 
 def resolve_angr_defaults(binary_path: str = "", pcode_language: str = "") -> tuple[str, str]:
     program_info = {}
@@ -267,24 +547,32 @@ def run_angryghidra_options(options: dict, timeout: int) -> str:
     script = find_angryghidra_script()
     if not script:
         return angryghidra_missing_message()
+    validation_error = validate_angryghidra_options(options)
+    if validation_error:
+        return validation_error
 
     python = os.environ.get("ANGRYGHIDRA_PYTHON") or os.environ.get("GHIDRA_MCP_ANGR_PYTHON") or default_angr_python()
     options_path = ""
+    effective_timeout = max(1, min(timeout, TIMEOUT_DECOMPILE_MAX))
     try:
         with tempfile.NamedTemporaryFile("w", suffix="-angryghidra.json", delete=False) as options_file:
             json.dump(options, options_file)
             options_path = options_file.name
-        completed = subprocess.run(
-            [python, script, options_path],
-            capture_output=True,
-            text=True,
-            timeout=max(1, timeout),
-            check=False,
-        )
+        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stdout_file, \
+                tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
+            completed = subprocess.run(
+                [python, script, options_path],
+                stdout=stdout_file,
+                stderr=stderr_file,
+                timeout=effective_timeout,
+                check=False,
+            )
+            output, output_truncated = read_limited_stream(stdout_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
+            errors, errors_truncated = read_limited_stream(stderr_file, ANGR_HELPER_OUTPUT_MAX_CHARS)
     except FileNotFoundError as e:
         return f"Failed to start AngryGhidra: {e}"
     except subprocess.TimeoutExpired:
-        return f"AngryGhidra timed out after {timeout} seconds"
+        return f"AngryGhidra timed out after {effective_timeout} seconds"
     finally:
         if options_path:
             try:
@@ -292,8 +580,12 @@ def run_angryghidra_options(options: dict, timeout: int) -> str:
             except OSError:
                 pass
 
-    output = completed.stdout.strip()
-    errors = completed.stderr.strip()
+    output = output.strip()
+    errors = errors.strip()
+    if output_truncated:
+        output += truncation_note("AngryGhidra stdout", ANGR_HELPER_OUTPUT_MAX_CHARS)
+    if errors_truncated:
+        errors += truncation_note("AngryGhidra stderr", ANGR_HELPER_OUTPUT_MAX_CHARS)
     if completed.returncode == 0:
         return output if output else "(AngryGhidra returned no solution)"
 
@@ -644,6 +936,19 @@ def angr_symbolic_find(
     requested_engine = engine.lower().strip()
     if requested_engine not in {"auto", "angryghidra", "core"}:
         return 'engine must be one of: "auto", "angryghidra", "core"'
+    _max_steps, error = bounded_int(max_steps, "max_steps", 1, ANGR_MAX_STEPS)
+    if error:
+        return error
+    max_steps = _max_steps
+    error = validate_symbolic_input_caps(
+        stdin_bytes=stdin_bytes,
+        argv_bytes=argv_bytes,
+        symbolic_memory_json=symbolic_memory_json,
+        memory_json=memory_json,
+        registers_json=registers_json,
+    )
+    if error:
+        return error
 
     program_info = {}
     if not binary_path or not pcode_language or not base_address:
@@ -689,7 +994,7 @@ def angr_symbolic_find(
     args = [
         "--binary", binary_path,
         "--symbolic-find", normalize_ghidra_address(find_address),
-        "--max-steps", str(max(0, max_steps)),
+        "--max-steps", str(max_steps),
     ]
     if start_address:
         args.extend(["--start-address", normalize_ghidra_address(start_address)])
@@ -739,19 +1044,27 @@ def angr_annotate_symbolic_path(
     comment_kind: str = "disasm",
     comment_prefix: str = "angr symbolic path",
     max_comments: int = 100,
+    apply: bool = False,
+    overwrite_existing: bool = False,
     timeout: int = 120,
     max_steps: int = 10000,
 ) -> str:
     """
     Run a symbolic path search and write path comments into the Ghidra program.
 
-    This is an explicit write endpoint. comment_kind may be "disasm",
+    This endpoint previews by default. Set apply=True and
+    overwrite_existing=True to write comments, because the current Ghidra
+    comment endpoints replace existing comments. comment_kind may be "disasm",
     "decomp", or "both"; comments are applied only when a trace/path is found.
-    The underlying path search prefers AngryGhidra in engine="auto" when the
-    request fits AngryGhidra's native script.
     """
     if comment_kind not in {"disasm", "decomp", "both"}:
         return 'comment_kind must be one of: "disasm", "decomp", "both"'
+    _max_comments, error = bounded_int(max_comments, "max_comments", 1, ANGR_MAX_COMMENTS)
+    if error:
+        return error
+    max_comments = _max_comments
+    if len(comment_prefix) > ANGR_MAX_COMMENT_PREFIX_CHARS:
+        return f"comment_prefix may contain at most {ANGR_MAX_COMMENT_PREFIX_CHARS} characters"
 
     result = angr_symbolic_find(
         find_address=find_address,
@@ -776,6 +1089,27 @@ def angr_annotate_symbolic_path(
     if not trace_addresses:
         return f"{result}\n\nNo trace addresses found; no comments were written."
 
+    total = len(trace_addresses)
+    normalized_target = normalize_ghidra_address(find_address)
+    preview = [
+        f"{address}: {comment_prefix}: step {index}/{total} toward {normalized_target}"
+        for index, address in enumerate(trace_addresses, start=1)
+    ]
+
+    if not apply:
+        return (
+            f"{result}\n\n"
+            f"Preview only: {len(trace_addresses)} trace comment(s) would be written. "
+            "Call with apply=True and overwrite_existing=True to write them.\n"
+            + "\n".join(preview)
+        )
+    if not overwrite_existing:
+        return (
+            f"{result}\n\n"
+            "Refusing to write comments because Ghidra's comment endpoints replace existing comments. "
+            "Call with overwrite_existing=True to confirm."
+        )
+
     endpoints = []
     if comment_kind in {"disasm", "both"}:
         endpoints.append("set_disassembly_comment")
@@ -783,8 +1117,6 @@ def angr_annotate_symbolic_path(
         endpoints.append("set_decompiler_comment")
 
     writes = []
-    total = len(trace_addresses)
-    normalized_target = normalize_ghidra_address(find_address)
     for index, address in enumerate(trace_addresses, start=1):
         comment = f"{comment_prefix}: step {index}/{total} toward {normalized_target}"
         for endpoint in endpoints:
@@ -829,11 +1161,31 @@ def angr_solve_constraints_at(
     missing = require_binary_path(binary_path)
     if missing:
         return missing
+    _max_steps, error = bounded_int(max_steps, "max_steps", 1, ANGR_MAX_STEPS)
+    if error:
+        return error
+    max_steps = _max_steps
+    error = validate_symbolic_input_caps(
+        stdin_bytes=stdin_bytes,
+        argv_bytes=argv_bytes,
+        symbolic_memory_json=symbolic_memory_json,
+        memory_json=memory_json,
+        registers_json=registers_json,
+    )
+    if error:
+        return error
+    error = validate_solver_caps(
+        constraints_json=constraints_json,
+        eval_memory_json=eval_memory_json,
+        eval_stdin_bytes=eval_stdin_bytes,
+    )
+    if error:
+        return error
 
     args = [
         "--binary", binary_path,
         "--solve-at", normalize_ghidra_address(address),
-        "--max-steps", str(max(0, max_steps)),
+        "--max-steps", str(max_steps),
     ]
     if start_address:
         args.extend(["--start-address", normalize_ghidra_address(start_address)])
@@ -884,6 +1236,10 @@ def angr_reachability(
     missing = require_binary_path(binary_path)
     if missing:
         return missing
+    _summary_limit, error = bounded_int(summary_limit, "summary_limit", 1, ANGR_MAX_SUMMARY_LIMIT)
+    if error:
+        return error
+    summary_limit = _summary_limit
 
     args = [
         "--binary", binary_path,
@@ -915,6 +1271,10 @@ def angr_cfg_summary(
     missing = require_binary_path(binary_path)
     if missing:
         return missing
+    _summary_limit, error = bounded_int(summary_limit, "summary_limit", 1, ANGR_MAX_SUMMARY_LIMIT)
+    if error:
+        return error
+    summary_limit = _summary_limit
 
     args = [
         "--binary", binary_path,
@@ -944,6 +1304,10 @@ def angr_callgraph_summary(
     missing = require_binary_path(binary_path)
     if missing:
         return missing
+    _summary_limit, error = bounded_int(summary_limit, "summary_limit", 1, ANGR_MAX_SUMMARY_LIMIT)
+    if error:
+        return error
+    summary_limit = _summary_limit
 
     args = [
         "--binary", binary_path,
@@ -975,6 +1339,16 @@ def angr_lift_block(
         return missing
     if lift_format not in {"vex", "ail", "both"}:
         return "lift_format must be one of: vex, ail, both"
+    if block_size:
+        _block_size, error = bounded_int(block_size, "block_size", 1, ANGR_MAX_BLOCK_SIZE)
+        if error:
+            return error
+        block_size = _block_size
+    if num_inst:
+        _num_inst, error = bounded_int(num_inst, "num_inst", 1, ANGR_MAX_NUM_INST)
+        if error:
+            return error
+        num_inst = _num_inst
 
     args = [
         "--binary", binary_path,
@@ -1008,6 +1382,10 @@ def angr_compare_decompilers(
     missing = require_binary_path(binary_path)
     if missing:
         return missing
+    _max_functions, error = bounded_int(max_functions, "max_functions", 1, ANGR_MAX_COMPARE_FUNCTIONS)
+    if error:
+        return error
+    max_functions = _max_functions
 
     selected_addresses = split_addresses(addresses, max_functions)
     if not selected_addresses:

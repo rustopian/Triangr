@@ -363,7 +363,33 @@ class TestAngrIntegrations:
 
         assert "AngryGhidra is not installed or configured" in out
 
-    def test_angr_annotate_symbolic_path_writes_trace_comments(
+    def test_angr_annotate_symbolic_path_previews_by_default(
+            self, bridge_module, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000\nt:0x401020")
+
+        out = bridge_module.angr_annotate_symbolic_path(find_address="0x401020")
+
+        assert "Preview only: 2 trace comment(s) would be written" in out
+        assert "0x401000: angr symbolic path: step 1/2 toward 0x401020" in out
+
+    def test_angr_annotate_symbolic_path_requires_overwrite_confirmation(
+            self, bridge_module, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            apply=True)
+
+        assert "Refusing to write comments" in out
+        assert "overwrite_existing=True" in out
+
+    def test_angr_annotate_symbolic_path_writes_trace_comments_with_confirmation(
             self, bridge_module, httpx_mock, monkeypatch):
         monkeypatch.setattr(
             bridge_module,
@@ -388,10 +414,30 @@ class TestAngrIntegrations:
 
         out = bridge_module.angr_annotate_symbolic_path(
             find_address="0x401020",
-            comment_kind="disasm")
+            comment_kind="disasm",
+            apply=True,
+            overwrite_existing=True)
 
         assert "Annotated 2 trace address(es)" in out
         assert "set_disassembly_comment 0x401000: Comment set successfully" in out
+
+    def test_angr_symbolic_find_rejects_unbounded_max_steps(
+            self, bridge_module):
+        out = bridge_module.angr_symbolic_find(
+            find_address="0x401020",
+            binary_path="/tmp/a.out",
+            max_steps=0)
+
+        assert "max_steps must be between 1" in out
+
+    def test_angr_symbolic_find_rejects_huge_symbolic_stdin(
+            self, bridge_module):
+        out = bridge_module.angr_symbolic_find(
+            find_address="0x401020",
+            binary_path="/tmp/a.out",
+            stdin_bytes=999999)
+
+        assert "stdin_bytes must be between 0 and 4096" in out
 
     def test_angr_solve_constraints_at_builds_rich_solver_args(
             self, bridge_module, httpx_mock, monkeypatch):
@@ -580,6 +626,15 @@ class TestAngrIntegrations:
             "--skip-rust-setup",
             "--pcode-language", "eBPF:LE:64:default",
         ], 12)
+
+    def test_angr_compare_decompilers_rejects_excessive_batch(
+            self, bridge_module):
+        out = bridge_module.angr_compare_decompilers(
+            "0x120",
+            binary_path="/tmp/sample.bin",
+            max_functions=999)
+
+        assert "max_functions must be between 1 and 25" in out
 
     def test_angryghidra_check_setup_missing_is_clear(
             self, bridge_module, monkeypatch):

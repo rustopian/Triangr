@@ -60,9 +60,13 @@ tools.
   reachability; `angr_cfg_summary` and `angr_callgraph_summary` summarize
   recovered graph structure; `angr_lift_block` lifts a block to VEX/AIL; and
   `angr_compare_decompilers` batches Ghidra-vs-Oxidizer decompiler output.
-- `angr_annotate_symbolic_path` is an explicit write endpoint: it runs symbolic
-  path search and writes the recovered trace as Ghidra disassembly and/or
-  decompiler comments.
+- `angr_annotate_symbolic_path` previews by default. To write the recovered
+  trace as Ghidra disassembly and/or decompiler comments, call it with
+  `apply=true` and `overwrite_existing=true`; the underlying Ghidra comment
+  endpoints replace existing comments.
+- angr/AngryGhidra execution is bounded by conservative limits on helper output,
+  symbolic input sizes, symbolic steps, summary output, lift size, and batch
+  comparison size.
 - AngryGhidra support is optional. `angryghidra_*` tools look for
   `ANGRYGHIDRA_SCRIPT`, `ANGRYGHIDRA_HOME/angryghidra_script/angryghidra.py`,
   or a sibling `AngryGhidra/angryghidra_script/angryghidra.py`. If none is

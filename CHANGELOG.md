@@ -18,7 +18,10 @@ The "Unreleased" section accumulates changes since the upstream `v1-4` release
   `engine="auto"|"angryghidra"|"core"` and uses AngryGhidra when installed and
   compatible with the request, while preserving the core helper fallback.
 - **Writeable angr annotations**: added `angr_annotate_symbolic_path` to run a
-  symbolic path search and write the recovered trace into Ghidra comments.
+  symbolic path search, preview recovered trace comments by default, and write
+  them only with explicit overwrite confirmation.
+- **angr safety caps**: bounded helper output, symbolic input sizes, execution
+  steps, summary output, lift size, and decompiler comparison batches.
 - **Richer symbolic solving**: `angr_solve_constraints_at` reaches a target
   address, applies JSON-described register/memory/stdin/argv constraints, and
   evaluates requested registers, memory, stdin, and symbolic inputs.
