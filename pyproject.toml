@@ -5,12 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "ghidramcp"
 dynamic = ["version"]
-description = "Model Context Protocol server for Ghidra reverse engineering"
+description = "Triangr MCP bridge for Ghidra project context and optional angr/Oxidizer analysis"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [
-    {name = "LaurieWired"}
+    {name = "LaurieWired"},
+    {name = "Triangr contributors"},
 ]
 keywords = ["ghidra", "reverse-engineering", "mcp", "model-context-protocol"]
 classifiers = [
@@ -35,9 +36,9 @@ angr = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/LaurieWired/GhidraMCP"
-Repository = "https://github.com/LaurieWired/GhidraMCP"
-Issues = "https://github.com/LaurieWired/GhidraMCP/issues"
+Homepage = "https://github.com/rustopian/GhidraMCP"
+Repository = "https://github.com/rustopian/GhidraMCP"
+Issues = "https://github.com/rustopian/GhidraMCP/issues"
 
 [project.scripts]
 bridge_mcp_ghidra = "bridge_mcp_ghidra:main"
