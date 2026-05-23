@@ -36,9 +36,9 @@ angr = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rustopian/GhidraMCP"
-Repository = "https://github.com/rustopian/GhidraMCP"
-Issues = "https://github.com/rustopian/GhidraMCP/issues"
+Homepage = "https://github.com/rustopian/Triangr"
+Repository = "https://github.com/rustopian/Triangr"
+Issues = "https://github.com/rustopian/Triangr/issues"
 
 [project.scripts]
 bridge_mcp_ghidra = "bridge_mcp_ghidra:main"

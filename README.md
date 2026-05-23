@@ -21,16 +21,60 @@ This fork preserves credit for the original work, design, and naming by
 LaurieWired. New endpoints, hardening, and incorporated pull requests are listed
 in [CHANGELOG.md](CHANGELOG.md).
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/rustopian/GhidraMCP)](https://github.com/rustopian/GhidraMCP/releases)
-[![GitHub stars](https://img.shields.io/github/stars/rustopian/GhidraMCP)](https://github.com/rustopian/GhidraMCP/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/rustopian/GhidraMCP)](https://github.com/rustopian/GhidraMCP/network/members)
-[![GitHub contributors](https://img.shields.io/github/contributors/rustopian/GhidraMCP)](https://github.com/rustopian/GhidraMCP/graphs/contributors)
-[![Follow @lauriewired](https://img.shields.io/twitter/follow/lauriewired?style=social)](https://twitter.com/lauriewired)
+[![CI](https://github.com/rustopian/Triangr/actions/workflows/build.yml/badge.svg)](https://github.com/rustopian/Triangr/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/rustopian/Triangr?label=release)](https://github.com/rustopian/Triangr/releases)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/rustopian/Triangr/blob/main/pyproject.toml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-![ghidra_MCP_logo](https://github.com/user-attachments/assets/4986d702-be3f-4697-acce-aea55cd79ad3)
+## Quick Start
 
-https://github.com/user-attachments/assets/36080514-f227-44bd-af84-78e29ee1d7f9
+Install Triangr and its local toolchain:
+
+```bash
+git clone https://github.com/rustopian/Triangr.git triangr
+cd triangr
+./scripts/install.sh --install-deps --yes
+```
+
+Start Ghidra and enable the plugin:
+
+```bash
+source ~/.local/share/triangr/env.sh
+"$GHIDRA_HOME/ghidraRun"
+```
+
+Open a program in CodeBrowser, then enable `Triangr` under `File` ->
+`Configure` -> `Developer`. The plugin starts a localhost HTTP server at
+`http://127.0.0.1:8080/`; verify it with:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+Add the MCP server to your AI tool's MCP JSON config, using the wrapper written
+by the installer:
+
+```json
+{
+  "mcpServers": {
+    "triangr": {
+      "command": "/ABSOLUTE/PATH/TO/.local/share/triangr/bin/triangr-mcp",
+      "args": [
+        "--ghidra-server",
+        "http://127.0.0.1:8080/"
+      ]
+    }
+  }
+}
+```
+
+Good first tasks:
+
+- "Summarize the loaded program and list the highest-signal functions."
+- "Decompile this function in Ghidra and compare it with Oxidizer."
+- "Find paths that can reach this address and explain the constraints."
+- "Create structures or rename functions only after showing the proposed edits."
+- "Annotate this symbolic path, but preview comment overwrites before applying."
 
 ## MCP
 
@@ -106,7 +150,7 @@ downloaded Ghidra release rather than relying on an arbitrary system Gradle.
 ### Using It
 
 ```bash
-git clone https://github.com/rustopian/GhidraMCP.git triangr
+git clone https://github.com/rustopian/Triangr.git triangr
 cd triangr
 ./scripts/install.sh
 ```
@@ -178,7 +222,7 @@ curl http://127.0.0.1:8080/health
 
 ## Manual Installation
 
-Download the latest [release](https://github.com/rustopian/GhidraMCP/releases)
+Download the latest [release](https://github.com/rustopian/Triangr/releases)
 from this repository. It contains the Ghidra plugin and Python MCP client.
 
 1. Run Ghidra.
@@ -196,8 +240,8 @@ from this repository. It contains the Ghidra plugin and Python MCP client.
 The Python MCP client can be installed from this repository:
 
 ```bash
-pipx install git+https://github.com/rustopian/GhidraMCP.git
-uv tool install git+https://github.com/rustopian/GhidraMCP.git
+pipx install git+https://github.com/rustopian/Triangr.git
+uv tool install git+https://github.com/rustopian/Triangr.git
 ```
 
 Or directly from a checkout:
