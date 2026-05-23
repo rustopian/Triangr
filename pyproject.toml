@@ -29,6 +29,11 @@ dependencies = [
     "tenacity>=8.2,<10",
 ]
 
+[project.optional-dependencies]
+angr = [
+    "angr==9.2.217",
+]
+
 [project.urls]
 Homepage = "https://github.com/LaurieWired/GhidraMCP"
 Repository = "https://github.com/LaurieWired/GhidraMCP"
@@ -40,6 +45,7 @@ bridge_mcp_ghidra = "bridge_mcp_ghidra:main"
 [tool.hatch.build]
 include = [
     "bridge_mcp_ghidra.py",
+    "angr_decompile.py",
     "README.md",
     "LICENSE",
 ]
@@ -54,12 +60,14 @@ fallback-version = "0.0"
 
 [tool.hatch.build.targets.wheel]
 only-include = [
-    "bridge_mcp_ghidra.py"
+    "bridge_mcp_ghidra.py",
+    "angr_decompile.py",
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "bridge_mcp_ghidra.py",
+    "angr_decompile.py",
     "README.md",
     "LICENSE",
 ]

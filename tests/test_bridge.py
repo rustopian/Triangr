@@ -157,6 +157,17 @@ class TestFunctionAccessors:
             text="No function at current location: ram:000a7558")
         assert "No function" in bridge_module.get_current_function()
 
+    def test_get_program_info(self, bridge_module, httpx_mock):
+        body = (
+            "name: sample.bin\n"
+            "executable_path: /tmp/sample.bin\n"
+            "language_id: eBPF:LE:64:default\n"
+            "image_base: 0x0")
+        httpx_mock.add_response(url=_url("program_info"), text=body)
+        out = bridge_module.get_program_info()
+        assert "executable_path: /tmp/sample.bin" in out
+        assert "language_id: eBPF:LE:64:default" in out
+
 
 # ---------------------------------------------------------------------------
 # Decompile / disassemble
@@ -204,6 +215,112 @@ class TestDecompile:
         out = bridge_module.disassemble_function("0x120")
         assert len(out) == 3
         assert out[0].startswith("ram:00000120:")
+
+
+# ---------------------------------------------------------------------------
+# Optional angr / AngryGhidra integrations (1.6.0)
+# ---------------------------------------------------------------------------
+
+class TestAngrIntegrations:
+
+    def test_angr_decompile_uses_program_info_defaults(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/sample.bin\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+
+        def fake_run(args, timeout):
+            calls["args"] = args
+            calls["timeout"] = timeout
+            return "oxidized"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+        out = bridge_module.angr_decompile_function("0x120", timeout=77)
+
+        assert out == "oxidized"
+        assert calls["timeout"] == 77
+        assert calls["args"] == [
+            "--binary", "/tmp/sample.bin",
+            "--address", "0x120",
+            "--rust",
+            "--skip-rust-setup",
+            "--pcode-language", "eBPF:LE:64:default",
+        ]
+
+    def test_angr_check_setup_with_explicit_binary(
+            self, bridge_module, monkeypatch):
+        calls = {}
+
+        def fake_run(args, timeout):
+            calls["args"] = args
+            calls["timeout"] = timeout
+            return "ok"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+        out = bridge_module.angr_check_setup(
+            binary_path="/tmp/a.out",
+            pcode_language="eBPF:LE:64:default")
+
+        assert out == "ok"
+        assert calls["timeout"] == 30
+        assert calls["args"] == [
+            "--check",
+            "--binary", "/tmp/a.out",
+            "--pcode-language", "eBPF:LE:64:default",
+        ]
+
+    def test_angr_symbolic_find_uses_core_angr_without_angryghidra(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/sample.bin\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+
+        def fake_run(args, timeout):
+            calls["args"] = args
+            calls["timeout"] = timeout
+            return "found: true"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+        out = bridge_module.angr_symbolic_find(
+            find_address="ram:00000180",
+            start_address="ram:00000120",
+            avoid_addresses="ram:00000140,0x160",
+            stdin_bytes=8,
+            symbolic_memory_json='{"0x2000": 32}',
+            registers_json='{"r1": "sv8", "r2": "0x10"}',
+            timeout=55,
+            max_steps=123)
+
+        assert out == "found: true"
+        assert calls["timeout"] == 55
+        assert calls["args"] == [
+            "--binary", "/tmp/sample.bin",
+            "--symbolic-find", "0x180",
+            "--max-steps", "123",
+            "--start-address", "0x120",
+            "--avoid-address", "0x140,0x160",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--stdin-bytes", "8",
+            "--symbolic-memory-json", '{"0x2000": 32}',
+            "--registers-json", '{"r1": "sv8", "r2": "0x10"}',
+        ]
+
+    def test_angryghidra_check_setup_missing_is_clear(
+            self, bridge_module, monkeypatch):
+        monkeypatch.setattr(bridge_module, "find_angryghidra_script", lambda: "")
+        out = bridge_module.angryghidra_check_setup()
+        assert "AngryGhidra is not installed or configured" in out
+        assert "Non-AngryGhidra MCP tools are unaffected" in out
+
+    def test_angryghidra_symbolic_execute_missing_is_clear(
+            self, bridge_module, monkeypatch):
+        monkeypatch.setattr(bridge_module, "find_angryghidra_script", lambda: "")
+        out = bridge_module.angryghidra_symbolic_execute(find_address="0x120")
+        assert "AngryGhidra is not installed or configured" in out
 
 
 # ---------------------------------------------------------------------------

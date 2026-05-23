@@ -8,15 +8,34 @@
 # ///
 
 import sys
+import os
+import json
+import glob
 import httpx
 import argparse
 import logging
+import subprocess
+import tempfile
 from urllib.parse import urljoin
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from mcp.server.fastmcp import FastMCP
 
 DEFAULT_GHIDRA_SERVER = "http://127.0.0.1:8080/"
+BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_ANGR_HELPER = os.path.join(BRIDGE_DIR, "angr_decompile.py")
+DEFAULT_ANGRYGHIDRA_SCRIPT = os.path.join(
+    BRIDGE_DIR,
+    "AngryGhidra",
+    "angryghidra_script",
+    "angryghidra.py",
+)
+PARENT_ANGRYGHIDRA_SCRIPT = os.path.join(
+    os.path.dirname(BRIDGE_DIR),
+    "AngryGhidra",
+    "angryghidra_script",
+    "angryghidra.py",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +104,103 @@ def safe_post(endpoint: str, data: dict | str) -> str:
             return f"Error {response.status_code}: {response.text.strip()}"
     except Exception as e:
         return f"Request failed: {str(e)}"
+
+def parse_key_value_lines(lines: list) -> dict:
+    result = {}
+    for line in lines:
+        if ": " in line:
+            key, value = line.split(": ", 1)
+            result[key.strip()] = value.strip()
+    return result
+
+def default_angr_python() -> str:
+    candidates = [
+        os.path.join(BRIDGE_DIR, ".venv", "bin", "python"),
+        os.path.join(BRIDGE_DIR, "GhidraMCP-fork", ".venv", "bin", "python"),
+        sys.executable,
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return sys.executable
+
+def infer_pcode_language(language_id: str | None) -> str:
+    if not language_id:
+        return ""
+    if language_id in {"eBPF:LE:64:default", "eBPF:BE:64:default", "BPF:LE:32:default"}:
+        return language_id
+    lowered = language_id.lower()
+    if "ebpf" in lowered or "bpf" in lowered or "solana" in lowered:
+        return "eBPF:LE:64:default"
+    return ""
+
+def normalize_ghidra_address(address: str) -> str:
+    value = (address or "").strip()
+    if not value:
+        return value
+    if value.startswith("0x") and ":" in value:
+        value = value[2:]
+    if ":" in value:
+        value = value.rsplit(":", 1)[1]
+        return f"0x{value.lstrip('0') or '0'}"
+    return value
+
+def run_angr_helper(args: list[str], timeout: int) -> str:
+    helper = os.environ.get("GHIDRA_MCP_ANGR_HELPER", DEFAULT_ANGR_HELPER)
+    python = os.environ.get("GHIDRA_MCP_ANGR_PYTHON", default_angr_python())
+    cmd = [python, helper, *args]
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        return f"Failed to start angr helper: {e}"
+    except subprocess.TimeoutExpired:
+        return f"angr helper timed out after {timeout} seconds"
+
+    output = completed.stdout.strip()
+    errors = completed.stderr.strip()
+    if completed.returncode == 0:
+        return output if output else "(angr returned no output)"
+
+    details = output
+    if errors:
+        details = f"{details}\n\nstderr:\n{errors}" if details else f"stderr:\n{errors}"
+    return f"angr helper failed with exit code {completed.returncode}\n\n{details}".strip()
+
+def find_angryghidra_script() -> str:
+    candidates = [
+        os.environ.get("ANGRYGHIDRA_SCRIPT", ""),
+        os.path.join(os.environ.get("ANGRYGHIDRA_HOME", ""), "angryghidra_script", "angryghidra.py"),
+        DEFAULT_ANGRYGHIDRA_SCRIPT,
+        PARENT_ANGRYGHIDRA_SCRIPT,
+    ]
+    candidates.extend(glob.glob(os.path.expanduser(
+        "~/Library/ghidra/*/Extensions/AngryGhidra/angryghidra_script/angryghidra.py"
+    )))
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return ""
+
+def angryghidra_missing_message() -> str:
+    return (
+        "AngryGhidra is not installed or configured. Install it next to this bridge "
+        f"at {os.path.dirname(DEFAULT_ANGRYGHIDRA_SCRIPT)} or set ANGRYGHIDRA_HOME "
+        "or ANGRYGHIDRA_SCRIPT. Non-AngryGhidra MCP tools are unaffected."
+    )
+
+def parse_optional_json(value: str, field_name: str):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{field_name} must be valid JSON: {e}") from e
 
 @mcp.tool()
 def list_methods(offset: int = 0, limit: int = 100) -> list:
@@ -198,11 +314,283 @@ def get_current_function() -> str:
     return "\n".join(safe_get("get_current_function"))
 
 @mcp.tool()
+def get_program_info() -> str:
+    """
+    Get metadata for the current Ghidra program, including executable path,
+    language id, compiler spec, image base, and address range.
+    """
+    return "\n".join(safe_get("program_info"))
+
+@mcp.tool()
 def list_functions() -> list:
     """
     List all functions in the database.
     """
     return safe_get("list_functions")
+
+@mcp.tool()
+def angr_decompile_function(
+    address: str,
+    binary_path: str = "",
+    rust: bool = True,
+    run_rust_setup: bool = False,
+    pcode_language: str = "",
+    timeout: int = 120,
+) -> str:
+    """
+    Decompile a function with angr/Oxidizer.
+
+    If binary_path is omitted, the current Ghidra program's executable path is
+    used. For Ghidra/Solana eBPF programs, the helper falls back to angr's
+    p-code engine using the Ghidra language id when possible.
+
+    Args:
+        address: Function entry address in hex (e.g. "0x1400010a0").
+        binary_path: Optional path to the binary. Defaults to current Ghidra
+                     program executable path.
+        rust: Enable angr's Rust-oriented decompiler/codegen path.
+        run_rust_setup: Run slower Rust setup analyses that may try to download
+                        FLIRT signatures if angr has not cached them yet.
+        pcode_language: Optional pypcode language id, such as
+                        "eBPF:LE:64:default".
+        timeout: Maximum helper runtime in seconds.
+    """
+    program_info = {}
+    if not binary_path or not pcode_language:
+        program_info = parse_key_value_lines(safe_get("program_info"))
+    if not binary_path:
+        binary_path = program_info.get("executable_path", "")
+    if not binary_path:
+        return "No binary_path provided and Ghidra did not return an executable_path"
+    if not pcode_language:
+        pcode_language = infer_pcode_language(program_info.get("language_id"))
+
+    args = ["--binary", binary_path, "--address", normalize_ghidra_address(address)]
+    if rust:
+        args.append("--rust")
+        if not run_rust_setup:
+            args.append("--skip-rust-setup")
+    else:
+        args.append("--no-rust")
+    if pcode_language:
+        args.extend(["--pcode-language", pcode_language])
+    return run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angr_check_setup(binary_path: str = "", pcode_language: str = "") -> str:
+    """
+    Verify the bridge can import angr and optionally load the current binary.
+    """
+    program_info = {}
+    if not binary_path or not pcode_language:
+        program_info = parse_key_value_lines(safe_get("program_info"))
+    if not binary_path:
+        binary_path = program_info.get("executable_path", "")
+    if not pcode_language:
+        pcode_language = infer_pcode_language(program_info.get("language_id"))
+
+    args = ["--check"]
+    if binary_path:
+        args.extend(["--binary", binary_path])
+    if pcode_language:
+        args.extend(["--pcode-language", pcode_language])
+    return run_angr_helper(args, 30)
+
+@mcp.tool()
+def angr_symbolic_find(
+    find_address: str,
+    binary_path: str = "",
+    start_address: str = "",
+    avoid_addresses: str = "",
+    pcode_language: str = "",
+    base_address: str = "",
+    stdin_bytes: int = 0,
+    argv_bytes: str = "",
+    symbolic_memory_json: str = "",
+    memory_json: str = "",
+    registers_json: str = "",
+    timeout: int = 120,
+    max_steps: int = 10000,
+) -> str:
+    """
+    Use core angr symbolic execution to find a path to an address.
+
+    This is independent of AngryGhidra. It can make stdin/argv symbolic, seed
+    symbolic memory, seed concrete memory/register values, and avoid addresses.
+
+    Args:
+        find_address: Address to reach.
+        binary_path: Optional binary path. Defaults to the current Ghidra
+                     program executable path.
+        start_address: Optional blank-state start address. If omitted, angr
+                       starts from the binary entry point.
+        avoid_addresses: Optional comma-separated addresses to avoid.
+        pcode_language: Optional pypcode language id.
+        base_address: Optional loader base address.
+        stdin_bytes: Symbolic stdin length in bytes.
+        argv_bytes: Comma-separated symbolic argv byte lengths, e.g. "8,16".
+        symbolic_memory_json: JSON object mapping address to symbolic byte
+                              length, e.g. {"0x1000": 32}.
+        memory_json: JSON object mapping address to concrete integer/hex value.
+        registers_json: JSON object mapping register names to values or "svN"
+                        for an N-byte symbolic register.
+        timeout: Maximum helper runtime in seconds.
+        max_steps: Maximum symbolic execution steps. Use 0 for unbounded.
+    """
+    program_info = {}
+    if not binary_path or not pcode_language:
+        program_info = parse_key_value_lines(safe_get("program_info"))
+    if not binary_path:
+        binary_path = program_info.get("executable_path", "")
+    if not binary_path:
+        return "No binary_path provided and Ghidra did not return an executable_path"
+    if not pcode_language:
+        pcode_language = infer_pcode_language(program_info.get("language_id"))
+
+    args = [
+        "--binary", binary_path,
+        "--symbolic-find", normalize_ghidra_address(find_address),
+        "--max-steps", str(max(0, max_steps)),
+    ]
+    if start_address:
+        args.extend(["--start-address", normalize_ghidra_address(start_address)])
+    if avoid_addresses:
+        normalized_avoid = ",".join(
+            normalize_ghidra_address(address)
+            for address in avoid_addresses.split(",")
+        )
+        args.extend(["--avoid-address", normalized_avoid])
+    if pcode_language:
+        args.extend(["--pcode-language", pcode_language])
+    if base_address:
+        args.extend(["--base-address", normalize_ghidra_address(base_address)])
+    if stdin_bytes > 0:
+        args.extend(["--stdin-bytes", str(stdin_bytes)])
+    if argv_bytes:
+        args.extend(["--argv-bytes", argv_bytes])
+    for option, value, field_name in [
+        ("--symbolic-memory-json", symbolic_memory_json, "symbolic_memory_json"),
+        ("--memory-json", memory_json, "memory_json"),
+        ("--registers-json", registers_json, "registers_json"),
+    ]:
+        parsed = parse_optional_json(value, field_name)
+        if parsed is not None:
+            args.extend([option, json.dumps(parsed)])
+
+    return run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angryghidra_check_setup() -> str:
+    """
+    Check whether the optional AngryGhidra script is installed and callable.
+    """
+    script = find_angryghidra_script()
+    if not script:
+        return angryghidra_missing_message()
+    python = os.environ.get("ANGRYGHIDRA_PYTHON") or os.environ.get("GHIDRA_MCP_ANGR_PYTHON") or default_angr_python()
+    return f"AngryGhidra script: {script}\nPython: {python}"
+
+@mcp.tool()
+def angryghidra_symbolic_execute(
+    find_address: str,
+    binary_path: str = "",
+    start_address: str = "",
+    avoid_addresses: str = "",
+    base_address: str = "",
+    raw_binary_arch: str = "",
+    auto_load_libs: bool = False,
+    arguments_json: str = "",
+    vectors_json: str = "",
+    mem_store_json: str = "",
+    regs_vals_json: str = "",
+    hooks_json: str = "",
+    timeout: int = 120,
+) -> str:
+    """
+    Run the optional AngryGhidra symbolic-execution script.
+
+    JSON fields should use AngryGhidra's native option shapes. If AngryGhidra is
+    not installed, this returns a clear error and leaves all other bridge tools
+    working normally.
+    """
+    script = find_angryghidra_script()
+    if not script:
+        return angryghidra_missing_message()
+
+    program_info = {}
+    if not binary_path or not base_address:
+        program_info = parse_key_value_lines(safe_get("program_info"))
+    if not binary_path:
+        binary_path = program_info.get("executable_path", "")
+    if not binary_path:
+        return "No binary_path provided and Ghidra did not return an executable_path"
+    if not base_address:
+        base_address = program_info.get("min_address", "0x0")
+    base_address = normalize_ghidra_address(base_address)
+    find_address = normalize_ghidra_address(find_address)
+
+    try:
+        options = {
+            "binary_file": binary_path,
+            "base_address": base_address,
+            "find_address": find_address,
+            "auto_load_libs": auto_load_libs,
+        }
+        if start_address:
+            options["blank_state"] = normalize_ghidra_address(start_address)
+        if avoid_addresses:
+            options["avoid_address"] = ",".join(
+                normalize_ghidra_address(address)
+                for address in avoid_addresses.split(",")
+            )
+        if raw_binary_arch:
+            options["raw_binary_arch"] = raw_binary_arch
+        for key, value in {
+            "arguments": arguments_json,
+            "vectors": vectors_json,
+            "mem_store": mem_store_json,
+            "regs_vals": regs_vals_json,
+            "hooks": hooks_json,
+        }.items():
+            parsed = parse_optional_json(value, key)
+            if parsed is not None:
+                options[key] = parsed
+    except ValueError as e:
+        return str(e)
+
+    python = os.environ.get("ANGRYGHIDRA_PYTHON") or os.environ.get("GHIDRA_MCP_ANGR_PYTHON") or default_angr_python()
+    options_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix="-angryghidra.json", delete=False) as options_file:
+            json.dump(options, options_file)
+            options_path = options_file.name
+        completed = subprocess.run(
+            [python, script, options_path],
+            capture_output=True,
+            text=True,
+            timeout=max(1, timeout),
+            check=False,
+        )
+    except FileNotFoundError as e:
+        return f"Failed to start AngryGhidra: {e}"
+    except subprocess.TimeoutExpired:
+        return f"AngryGhidra timed out after {timeout} seconds"
+    finally:
+        if options_path:
+            try:
+                os.unlink(options_path)
+            except OSError:
+                pass
+
+    output = completed.stdout.strip()
+    errors = completed.stderr.strip()
+    if completed.returncode == 0:
+        return output if output else "(AngryGhidra returned no solution)"
+
+    details = output
+    if errors:
+        details = f"{details}\n\nstderr:\n{errors}" if details else f"stderr:\n{errors}"
+    return f"AngryGhidra failed with exit code {completed.returncode}\n\n{details}".strip()
 
 @mcp.tool()
 def decompile_by_addr(address: str, timeout: int = 120) -> str:
