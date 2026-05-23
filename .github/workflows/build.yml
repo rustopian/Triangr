@@ -5,6 +5,8 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -160,6 +162,8 @@ jobs:
           source "$TRIANGR_PREFIX/env.sh"
           test -x "$GHIDRA_HOME/ghidraRun"
           test -d "$GHIDRA_HOME/Ghidra/Extensions/GhidraMCP"
+          test -x "$TRIANGR_PREFIX/bin/triangr-mcp"
           "$GHIDRA_MCP_ANGR_PYTHON" -c "import angr; print(angr.__version__)"
           "$GHIDRA_MCP_ANGR_PYTHON" -m bridge_mcp_ghidra --help >/dev/null
+          "$TRIANGR_PREFIX/bin/triangr-mcp" --help >/dev/null
           test -f "$ANGRYGHIDRA_SCRIPT"
