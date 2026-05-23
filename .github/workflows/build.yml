@@ -104,7 +104,7 @@ jobs:
     # python-tests because it is intentionally heavier and benefits from cache.
     runs-on: ubuntu-latest
     env:
-      TRIANGR_PREFIX: ${{ runner.temp }}/triangr
+      TRIANGR_PREFIX: /tmp/triangr
       TRIANGR_CACHE: /home/runner/.cache/triangr-ci
     steps:
       - uses: actions/checkout@v4
