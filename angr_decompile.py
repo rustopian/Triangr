@@ -7,11 +7,24 @@ import sys
 import traceback
 from collections import deque
 from contextlib import redirect_stderr
+from itertools import islice
 
 BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 os.environ.setdefault("XDG_CACHE_HOME", os.path.join(BRIDGE_DIR, ".angr-cache"))
+
+MAX_JSON_INPUT_CHARS = 100_000
+MAX_SYMBOLIC_BYTES = 4096
+MAX_TOTAL_SYMBOLIC_BYTES = 16_384
+MAX_SYMBOLIC_ARGS = 16
+MAX_SYMBOLIC_REGIONS = 64
+MAX_SYMBOLIC_REGISTER_BYTES = 64
+MAX_CONSTRAINTS = 128
+MAX_STEPS = 100_000
+MAX_SUMMARY_LIMIT = 500
+MAX_BLOCK_SIZE = 4096
+MAX_NUM_INST = 256
 
 
 def parse_address(value: str) -> int:
@@ -77,6 +90,8 @@ def make_project(
 def parse_json_map(value: str, field_name: str) -> dict:
     if not value:
         return {}
+    if len(value) > MAX_JSON_INPUT_CHARS:
+        raise ValueError(f"{field_name} exceeds {MAX_JSON_INPUT_CHARS} characters")
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
@@ -86,10 +101,31 @@ def parse_json_map(value: str, field_name: str) -> dict:
     return parsed
 
 
-def parse_csv_ints(value: str) -> list[int]:
+def checked_int(value, field_name: str, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(str(value), 0)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+    if parsed < minimum or parsed > maximum:
+        raise ValueError(f"{field_name} must be between {minimum} and {maximum}")
+    return parsed
+
+
+def parse_csv_ints(
+    value: str,
+    field_name: str,
+    max_items: int,
+    max_value: int,
+) -> list[int]:
     if not value:
         return []
-    return [int(part.strip(), 0) for part in value.split(",") if part.strip()]
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if len(parts) > max_items:
+        raise ValueError(f"{field_name} may contain at most {max_items} entries")
+    return [
+        checked_int(part, f"{field_name} entry", 1, max_value)
+        for part in parts
+    ]
 
 
 def parse_csv_strings(value: str) -> list[str]:
@@ -141,8 +177,10 @@ def normalize_register_name(project, reg_name: str) -> str:
 def make_block(project, address: int, block_size: int = 0, num_inst: int = 0):
     kwargs = {}
     if block_size > 0:
+        block_size = checked_int(block_size, "block_size", 1, MAX_BLOCK_SIZE)
         kwargs["size"] = block_size
     if num_inst > 0:
+        num_inst = checked_int(num_inst, "num_inst", 1, MAX_NUM_INST)
         kwargs["num_inst"] = num_inst
     return project.factory.block(address, **kwargs)
 
@@ -162,16 +200,26 @@ def setup_symbolic_execution(args: argparse.Namespace, target_value: str):
 
     argv = [args.binary]
     symbolic_argv = []
-    for index, length in enumerate(parse_csv_ints(args.argv_bytes), start=1):
+    total_symbolic = 0
+    argv_lengths = parse_csv_ints(
+        args.argv_bytes,
+        "argv_bytes",
+        MAX_SYMBOLIC_ARGS,
+        MAX_SYMBOLIC_BYTES,
+    )
+    for index, length in enumerate(argv_lengths, start=1):
         sym_arg = claripy.BVS(f"argv{index}", length * 8)
         symbolic_argv.append((index, length, sym_arg))
         argv.append(sym_arg)
+        total_symbolic += length
 
     symbolic_stdin = None
     stdin = None
     if args.stdin_bytes > 0:
+        args.stdin_bytes = checked_int(args.stdin_bytes, "stdin_bytes", 1, MAX_SYMBOLIC_BYTES)
         symbolic_stdin = claripy.BVS("stdin", args.stdin_bytes * 8)
         stdin = symbolic_stdin
+        total_symbolic += args.stdin_bytes
 
     if args.start_address:
         state_kwargs = {}
@@ -187,33 +235,60 @@ def setup_symbolic_execution(args: argparse.Namespace, target_value: str):
         state = project.factory.entry_state(**state_kwargs)
 
     symbolic_memory = {}
-    for addr, length in parse_json_map(args.symbolic_memory_json, "symbolic_memory_json").items():
+    symbolic_memory_map = parse_json_map(args.symbolic_memory_json, "symbolic_memory_json")
+    if len(symbolic_memory_map) > MAX_SYMBOLIC_REGIONS:
+        raise ValueError(f"symbolic_memory_json may contain at most {MAX_SYMBOLIC_REGIONS} entries")
+    for addr, length in symbolic_memory_map.items():
         mem_addr = parse_address(str(addr))
-        mem_len = int(str(length), 0)
+        mem_len = checked_int(
+            length,
+            f"symbolic_memory_json[{addr!r}]",
+            1,
+            MAX_SYMBOLIC_BYTES,
+        )
         sym_mem = claripy.BVS(f"mem_{mem_addr:x}", mem_len * 8)
         symbolic_memory[mem_addr] = (mem_len, sym_mem)
         state.memory.store(mem_addr, sym_mem)
+        total_symbolic += mem_len
 
-    for addr, value in parse_json_map(args.memory_json, "memory_json").items():
+    memory_map = parse_json_map(args.memory_json, "memory_json")
+    if len(memory_map) > MAX_SYMBOLIC_REGIONS:
+        raise ValueError(f"memory_json may contain at most {MAX_SYMBOLIC_REGIONS} entries")
+    for addr, value in memory_map.items():
         mem_addr = parse_address(str(addr))
         if isinstance(value, str):
             concrete = int(value, 0)
         else:
             concrete = int(value)
+        if concrete < 0:
+            raise ValueError(f"memory_json[{addr!r}] must be non-negative")
         byte_len = max(1, (concrete.bit_length() + 7) // 8)
+        if byte_len > MAX_SYMBOLIC_BYTES:
+            raise ValueError(f"memory_json[{addr!r}] may contain at most {MAX_SYMBOLIC_BYTES} bytes")
         state.memory.store(mem_addr, concrete, size=byte_len)
 
     symbolic_registers = {}
     registers = parse_json_map(args.registers_json, "registers_json")
+    if len(registers) > MAX_SYMBOLIC_REGIONS:
+        raise ValueError(f"registers_json may contain at most {MAX_SYMBOLIC_REGIONS} entries")
     for reg_name, value in registers.items():
         reg_name = normalize_register_name(project, reg_name)
         if isinstance(value, str) and value.startswith("sv"):
-            byte_len = int(value[2:], 0)
+            byte_len = checked_int(
+                value[2:],
+                f"registers_json[{reg_name!r}]",
+                1,
+                MAX_SYMBOLIC_REGISTER_BYTES,
+            )
             sym_reg = claripy.BVS(f"reg_{reg_name}", byte_len * 8)
             symbolic_registers[reg_name] = (byte_len, sym_reg)
             setattr(state.regs, reg_name, sym_reg)
+            total_symbolic += byte_len
         else:
             setattr(state.regs, reg_name, int(str(value), 0))
+
+    if total_symbolic > MAX_TOTAL_SYMBOLIC_BYTES:
+        raise ValueError(f"total symbolic input may not exceed {MAX_TOTAL_SYMBOLIC_BYTES} bytes")
 
     symbols = {
         "stdin": (args.stdin_bytes, symbolic_stdin),
@@ -227,16 +302,14 @@ def setup_symbolic_execution(args: argparse.Namespace, target_value: str):
 def run_explorer(project, state, target_addr: int, avoid: list[int], max_steps: int):
     import angr
 
+    max_steps = checked_int(max_steps, "max_steps", 1, MAX_STEPS)
     simgr = project.factory.simulation_manager(state)
     explorer_kwargs = {"find": target_addr}
     if avoid:
         explorer_kwargs["avoid"] = avoid
     simgr.use_technique(angr.exploration_techniques.Explorer(**explorer_kwargs))
 
-    if max_steps > 0:
-        simgr.run(n=max_steps)
-    else:
-        simgr.run()
+    simgr.run(n=max_steps)
     return simgr
 
 
@@ -260,7 +333,8 @@ def get_symbolic_ast(state, symbols, item: dict):
         reg_name = normalize_register_name(state.project, item["name"])
         return getattr(state.regs, reg_name)
     if target_type == "mem":
-        return state.memory.load(parse_address(str(item["address"])), int(str(item["length"]), 0))
+        mem_len = checked_int(item["length"], "constraint memory length", 1, MAX_SYMBOLIC_BYTES)
+        return state.memory.load(parse_address(str(item["address"])), mem_len)
     if target_type == "stdin":
         _length, symbolic_stdin = symbols["stdin"]
         if symbolic_stdin is None:
@@ -280,9 +354,14 @@ def concrete_bvv(state, item: dict, bits: int):
 
     if "value_hex" in item:
         raw = bytes.fromhex(str(item["value_hex"]).removeprefix("0x"))
+        if len(raw) * 8 != bits:
+            raise ValueError(f"value_hex is {len(raw) * 8} bits, expected {bits}")
         return claripy.BVV(raw)
     if "value_bytes" in item:
-        return claripy.BVV(str(item["value_bytes"]).encode())
+        raw = str(item["value_bytes"]).encode()
+        if len(raw) * 8 != bits:
+            raise ValueError(f"value_bytes is {len(raw) * 8} bits, expected {bits}")
+        return claripy.BVV(raw)
     if "value" not in item:
         raise ValueError("constraint is missing value, value_hex, or value_bytes")
     return claripy.BVV(int(str(item["value"]), 0), bits)
@@ -389,6 +468,8 @@ def run_solve_at(args: argparse.Namespace) -> int:
     if not args.constraints_json:
         parsed_constraints = []
     else:
+        if len(args.constraints_json) > MAX_JSON_INPUT_CHARS:
+            raise ValueError(f"constraints_json exceeds {MAX_JSON_INPUT_CHARS} characters")
         decoded_constraints = json.loads(args.constraints_json)
         if isinstance(decoded_constraints, dict):
             parsed_constraints = decoded_constraints.get("constraints", [])
@@ -396,6 +477,8 @@ def run_solve_at(args: argparse.Namespace) -> int:
             parsed_constraints = decoded_constraints
     if not isinstance(parsed_constraints, list):
         raise ValueError("constraints_json constraints must be a list")
+    if len(parsed_constraints) > MAX_CONSTRAINTS:
+        raise ValueError(f"constraints_json may contain at most {MAX_CONSTRAINTS} entries")
 
     for item in parsed_constraints:
         if not isinstance(item, dict):
@@ -415,13 +498,22 @@ def run_solve_at(args: argparse.Namespace) -> int:
         reg_name = normalize_register_name(project, reg_name)
         print(f"eval_reg[{reg_name}] = {found.solver.eval(getattr(found.regs, reg_name)):#x}")
 
-    for addr, length in parse_json_map(args.eval_memory_json, "eval_memory_json").items():
+    eval_memory = parse_json_map(args.eval_memory_json, "eval_memory_json")
+    if len(eval_memory) > MAX_SYMBOLIC_REGIONS:
+        raise ValueError(f"eval_memory_json may contain at most {MAX_SYMBOLIC_REGIONS} entries")
+    for addr, length in eval_memory.items():
         mem_addr = parse_address(str(addr))
-        mem_len = int(str(length), 0)
+        mem_len = checked_int(length, f"eval_memory_json[{addr!r}]", 1, MAX_SYMBOLIC_BYTES)
         value = found.solver.eval(found.memory.load(mem_addr, mem_len), cast_to=bytes)
         print(f"eval_mem[{hex_addr(mem_addr)}:{mem_len}] = {value!r}")
 
     if args.eval_stdin_bytes > 0:
+        args.eval_stdin_bytes = checked_int(
+            args.eval_stdin_bytes,
+            "eval_stdin_bytes",
+            1,
+            MAX_SYMBOLIC_BYTES,
+        )
         stdin_len, symbolic_stdin = symbols["stdin"]
         if symbolic_stdin is None:
             print("eval_stdin = <stdin is not symbolic>")
@@ -433,6 +525,7 @@ def run_solve_at(args: argparse.Namespace) -> int:
 
 
 def run_reachability(args: argparse.Namespace) -> int:
+    args.summary_limit = checked_int(args.summary_limit, "summary_limit", 1, MAX_SUMMARY_LIMIT)
     source = parse_address(args.reachability_from)
     target = parse_address(args.reachability_to)
     project = make_project(
@@ -496,6 +589,7 @@ def run_reachability(args: argparse.Namespace) -> int:
 
 
 def run_cfg_summary(args: argparse.Namespace) -> int:
+    args.summary_limit = checked_int(args.summary_limit, "summary_limit", 1, MAX_SUMMARY_LIMIT)
     project = make_project(
         args.binary,
         args.pcode_language,
@@ -533,12 +627,13 @@ def run_cfg_summary(args: argparse.Namespace) -> int:
         return 0
 
     print("functions_sample:")
-    for func in list(project.kb.functions.values())[: args.summary_limit]:
+    for func in islice(project.kb.functions.values(), args.summary_limit):
         print(f"  {func.addr:#x} {func.name} blocks={len(func.block_addrs_set)}")
     return 0
 
 
 def run_callgraph_summary(args: argparse.Namespace) -> int:
+    args.summary_limit = checked_int(args.summary_limit, "summary_limit", 1, MAX_SUMMARY_LIMIT)
     project = make_project(
         args.binary,
         args.pcode_language,
@@ -553,12 +648,12 @@ def run_callgraph_summary(args: argparse.Namespace) -> int:
     print(f"functions: {callgraph.number_of_nodes()}")
     print(f"calls: {callgraph.number_of_edges()}")
 
-    edges = list(callgraph.edges())
+    edge_count = callgraph.number_of_edges()
     print("edges:")
-    for src, dst in edges[: args.summary_limit]:
+    for src, dst in islice(callgraph.edges(), args.summary_limit):
         print(f"  {function_label(project, src)} -> {function_label(project, dst)}")
-    if len(edges) > args.summary_limit:
-        print(f"  ... {len(edges) - args.summary_limit} more edges")
+    if edge_count > args.summary_limit:
+        print(f"  ... {edge_count - args.summary_limit} more edges")
     return 0
 
 
@@ -671,7 +766,7 @@ def main() -> int:
     parser.add_argument("--symbolic-memory-json", default="", help="JSON object mapping address to symbolic byte length")
     parser.add_argument("--memory-json", default="", help="JSON object mapping address to concrete integer/hex value")
     parser.add_argument("--registers-json", default="", help='JSON object mapping register names to values or "svN" symbolic byte lengths')
-    parser.add_argument("--max-steps", type=int, default=10000, help="Maximum symbolic execution steps, or 0 for unbounded")
+    parser.add_argument("--max-steps", type=int, default=10000, help=f"Maximum symbolic execution steps, 1-{MAX_STEPS}")
     parser.add_argument("--solve-at", help="Find an address and solve/evaluate requested constraints there")
     parser.add_argument("--constraints-json", default="", help="JSON list of constraints, or object with a constraints list")
     parser.add_argument("--eval-registers", default="", help="Comma-separated register names to evaluate after solve-at")
@@ -693,6 +788,14 @@ def main() -> int:
     rust_group.add_argument("--rust", dest="rust", action="store_true", default=True)
     rust_group.add_argument("--no-rust", dest="rust", action="store_false")
     args = parser.parse_args()
+    args.max_steps = checked_int(args.max_steps, "max_steps", 1, MAX_STEPS)
+    args.stdin_bytes = checked_int(args.stdin_bytes, "stdin_bytes", 0, MAX_SYMBOLIC_BYTES)
+    args.eval_stdin_bytes = checked_int(args.eval_stdin_bytes, "eval_stdin_bytes", 0, MAX_SYMBOLIC_BYTES)
+    args.summary_limit = checked_int(args.summary_limit, "summary_limit", 1, MAX_SUMMARY_LIMIT)
+    if args.block_size < 0:
+        raise ValueError("block_size must be non-negative")
+    if args.num_inst < 0:
+        raise ValueError("num_inst must be non-negative")
 
     if args.check:
         if not args.binary:
@@ -744,6 +847,12 @@ if __name__ == "__main__":
     try:
         with redirect_stderr(stderr):
             exit_code = main()
+    except ValueError as exc:
+        captured = stderr.getvalue().strip()
+        if captured:
+            print(captured, file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         captured = stderr.getvalue().strip()
         if captured:
