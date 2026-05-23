@@ -22,6 +22,26 @@ def _url(endpoint: str) -> str:
     return BASE_URL + endpoint
 
 
+def _preview_token(output: str) -> str:
+    for line in output.splitlines():
+        if line.startswith("preview_token: "):
+            return line.split(": ", 1)[1]
+    raise AssertionError("preview_token not found")
+
+
+def _mock_comment(httpx_mock, address: str, kind: str = "disasm", comment: str = "", count: int = 1):
+    for _ in range(count):
+        httpx_mock.add_response(
+            url=_url(f"get_comment?address={address}&kind={kind}"),
+            json={
+                "address": address,
+                "kind": kind,
+                "exists": bool(comment),
+                "comment": comment,
+            },
+        )
+
+
 # ---------------------------------------------------------------------------
 # Listing endpoints (GET ?offset=&limit=)
 # ---------------------------------------------------------------------------
@@ -271,7 +291,7 @@ class TestAngrIntegrations:
             "--pcode-language", "eBPF:LE:64:default",
         ]
 
-    def test_angr_symbolic_find_uses_core_angr_without_angryghidra(
+    def test_angr_symbolic_find_falls_back_to_core_when_angryghidra_cannot_represent_request(
             self, bridge_module, httpx_mock, monkeypatch):
         httpx_mock.add_response(
             url=_url("program_info"),
@@ -295,7 +315,7 @@ class TestAngrIntegrations:
             timeout=55,
             max_steps=123)
 
-        assert out == "found: true"
+        assert out == "engine: core angr\nfound: true"
         assert calls["timeout"] == 55
         assert calls["args"] == [
             "--binary", "/tmp/sample.bin",
@@ -308,6 +328,418 @@ class TestAngrIntegrations:
             "--symbolic-memory-json", '{"0x2000": 32}',
             "--registers-json", '{"r1": "sv8", "r2": "0x10"}',
         ]
+
+    def test_angr_symbolic_find_prefers_angryghidra_when_available(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/a.out\n"
+                 "language_id: x86:LE:64:default\n"
+                 "min_address: 0x400000")
+        monkeypatch.setattr(bridge_module, "find_angryghidra_script", lambda: "/opt/angryghidra.py")
+        calls = {}
+
+        def fake_run(options, timeout):
+            calls["options"] = options
+            calls["timeout"] = timeout
+            return "t:0x401000\nt:0x401020\nargv[1] = b'ok'"
+
+        monkeypatch.setattr(bridge_module, "run_angryghidra_options", fake_run)
+        out = bridge_module.angr_symbolic_find(
+            find_address="0x401020",
+            start_address="0x401000",
+            argv_bytes="4",
+            symbolic_memory_json='{"0x404000": 8}',
+            memory_json='{"0x405000": "0x41"}',
+            registers_json='{"rax": "sv8"}',
+            timeout=44)
+
+        assert out.startswith("engine: AngryGhidra\n")
+        assert calls["timeout"] == 44
+        assert calls["options"] == {
+            "binary_file": "/tmp/a.out",
+            "base_address": "0x400000",
+            "find_address": "0x401020",
+            "auto_load_libs": False,
+            "blank_state": "0x401000",
+            "arguments": {"1": "4"},
+            "vectors": {"0x404000": "8"},
+            "mem_store": {"0x405000": "0x41"},
+            "regs_vals": {"rax": "sv8"},
+        }
+
+    def test_angr_symbolic_find_forced_angryghidra_missing_is_clear(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/a.out\n"
+                 "language_id: x86:LE:64:default\n"
+                 "min_address: 0x400000")
+        monkeypatch.setattr(bridge_module, "find_angryghidra_script", lambda: "")
+
+        out = bridge_module.angr_symbolic_find(
+            find_address="0x401020",
+            engine="angryghidra")
+
+        assert "AngryGhidra is not installed or configured" in out
+
+    def test_angr_annotate_symbolic_path_previews_by_default(
+            self, bridge_module, httpx_mock, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000\nt:0x401020")
+        _mock_comment(httpx_mock, "0x401000", comment="existing branch note")
+        _mock_comment(httpx_mock, "0x401020")
+
+        out = bridge_module.angr_annotate_symbolic_path(find_address="0x401020")
+
+        assert "Preview only: 2 trace comment(s) would be written" in out
+        assert "preview_token: " in out
+        assert "- disasm 0x401000" in out
+        assert "current: existing branch note" in out
+        assert "pending: angr symbolic path: step 1/2 toward 0x401020" in out
+        assert "- disasm 0x401020" in out
+        assert "current: <none>" in out
+
+    def test_angr_annotate_symbolic_path_requires_overwrite_confirmation(
+            self, bridge_module, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            apply=True)
+
+        assert "Refusing to write comments" in out
+        assert "overwrite_existing=True" in out
+
+    def test_angr_annotate_symbolic_path_requires_matching_preview_token(
+            self, bridge_module, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            apply=True,
+            overwrite_existing=True)
+
+        assert "no matching preview token" in out
+        assert "First call angr_annotate_symbolic_path" in out
+
+    def test_angr_annotate_symbolic_path_rejects_changed_call_after_preview(
+            self, bridge_module, httpx_mock, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+        _mock_comment(httpx_mock, "0x401000", count=2)
+        preview = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            comment_prefix="previewed path")
+        token = _preview_token(preview)
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            comment_prefix="changed path",
+            apply=True,
+            overwrite_existing=True,
+            preview_token=token)
+
+        assert "preview_token does not match this exact annotation request" in out
+
+    def test_angr_annotate_symbolic_path_rejects_changed_current_comment(
+            self, bridge_module, httpx_mock, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+        _mock_comment(httpx_mock, "0x401000", comment="old")
+        _mock_comment(httpx_mock, "0x401000", comment="changed")
+        preview = bridge_module.angr_annotate_symbolic_path(find_address="0x401020")
+        token = _preview_token(preview)
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            apply=True,
+            overwrite_existing=True,
+            preview_token=token)
+
+        assert "preview_token does not match this exact annotation request" in out
+
+    def test_angr_annotate_symbolic_path_requires_comment_read_before_token(
+            self, bridge_module, httpx_mock, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+        httpx_mock.add_response(
+            url=_url("get_comment?address=0x401000&kind=disasm"),
+            status_code=404,
+            text="missing")
+
+        out = bridge_module.angr_annotate_symbolic_path(find_address="0x401020")
+
+        assert "could not be read" in out
+        assert "preview_token:" not in out
+
+    def test_angr_annotate_symbolic_path_writes_trace_comments_with_confirmation(
+            self, bridge_module, httpx_mock, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000\nt:0x401020")
+        _mock_comment(httpx_mock, "0x401000", comment="existing branch note", count=2)
+        _mock_comment(httpx_mock, "0x401020", count=2)
+        httpx_mock.add_response(
+            method="POST",
+            url=_url("set_disassembly_comment"),
+            match_content=(
+                b"address=0x401000&comment=angr+symbolic+path%3A+step+1%2F2+"
+                b"toward+0x401020"
+            ),
+            text="Comment set successfully")
+        httpx_mock.add_response(
+            method="POST",
+            url=_url("set_disassembly_comment"),
+            match_content=(
+                b"address=0x401020&comment=angr+symbolic+path%3A+step+2%2F2+"
+                b"toward+0x401020"
+            ),
+            text="Comment set successfully")
+
+        preview = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            comment_kind="disasm")
+        token = _preview_token(preview)
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            comment_kind="disasm",
+            apply=True,
+            overwrite_existing=True,
+            preview_token=token)
+
+        assert "Annotated 2 trace address(es)" in out
+        assert "set_disassembly_comment 0x401000: Comment set successfully" in out
+
+    def test_angr_symbolic_find_rejects_unbounded_max_steps(
+            self, bridge_module):
+        out = bridge_module.angr_symbolic_find(
+            find_address="0x401020",
+            binary_path="/tmp/a.out",
+            max_steps=0)
+
+        assert "max_steps must be between 1" in out
+
+    def test_angr_symbolic_find_rejects_huge_symbolic_stdin(
+            self, bridge_module):
+        out = bridge_module.angr_symbolic_find(
+            find_address="0x401020",
+            binary_path="/tmp/a.out",
+            stdin_bytes=999999)
+
+        assert "stdin_bytes must be between 0 and 4096" in out
+
+    def test_angr_solve_constraints_at_builds_rich_solver_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/sample.bin\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+
+        def fake_run(args, timeout):
+            calls["args"] = args
+            calls["timeout"] = timeout
+            return "satisfiable: true"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+        out = bridge_module.angr_solve_constraints_at(
+            address="ram:00000180",
+            start_address="ram:00000120",
+            constraints_json='[{"type":"reg","name":"r1","op":"==","value":"0x10"}]',
+            eval_registers="r0,r1",
+            eval_memory_json='{"0x3000": 8}',
+            timeout=88,
+            max_steps=44)
+
+        assert out == "satisfiable: true"
+        assert calls["timeout"] == 88
+        assert calls["args"] == [
+            "--binary", "/tmp/sample.bin",
+            "--solve-at", "0x180",
+            "--max-steps", "44",
+            "--start-address", "0x120",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--constraints-json", '[{"type": "reg", "name": "r1", "op": "==", "value": "0x10"}]',
+            "--eval-memory-json", '{"0x3000": 8}',
+            "--eval-registers", "r0,r1",
+        ]
+
+    def test_angr_reachability_builds_cfg_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/sample.bin\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+        def fake_run(args, timeout):
+            calls["data"] = (args, timeout)
+            return "reachable: true"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+
+        out = bridge_module.angr_reachability(
+            "ram:00000120",
+            "ram:00000180",
+            complete_cfg=True,
+            include_path=False,
+            summary_limit=7,
+            timeout=99)
+
+        assert out == "reachable: true"
+        args, timeout = calls["data"]
+        assert timeout == 99
+        assert args == [
+            "--binary", "/tmp/sample.bin",
+            "--reachability-from", "0x120",
+            "--reachability-to", "0x180",
+            "--summary-limit", "7",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--complete-cfg",
+        ]
+
+    def test_angr_cfg_summary_builds_function_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/sample.bin\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+        def fake_run(args, timeout):
+            calls["data"] = (args, timeout)
+            return "cfg"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+
+        out = bridge_module.angr_cfg_summary(
+            function_address="ram:00000120",
+            summary_limit=5,
+            timeout=66)
+
+        assert out == "cfg"
+        args, timeout = calls["data"]
+        assert timeout == 66
+        assert args == [
+            "--binary", "/tmp/sample.bin",
+            "--cfg-summary",
+            "--summary-limit", "5",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--function-address", "0x120",
+        ]
+
+    def test_angr_callgraph_summary_builds_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/sample.bin\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+        def fake_run(args, timeout):
+            calls["data"] = (args, timeout)
+            return "callgraph"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+
+        out = bridge_module.angr_callgraph_summary(summary_limit=3, timeout=77)
+
+        assert out == "callgraph"
+        args, timeout = calls["data"]
+        assert timeout == 77
+        assert args == [
+            "--binary", "/tmp/sample.bin",
+            "--callgraph-summary",
+            "--summary-limit", "3",
+            "--pcode-language", "eBPF:LE:64:default",
+        ]
+
+    def test_angr_lift_block_builds_args(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/sample.bin\n"
+                 "language_id: eBPF:LE:64:default")
+        calls = {}
+        def fake_run(args, timeout):
+            calls["data"] = (args, timeout)
+            return "AIL"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+
+        out = bridge_module.angr_lift_block(
+            "ram:00000120",
+            lift_format="ail",
+            num_inst=4,
+            timeout=33)
+
+        assert out == "AIL"
+        args, timeout = calls["data"]
+        assert timeout == 33
+        assert args == [
+            "--binary", "/tmp/sample.bin",
+            "--lift-block", "0x120",
+            "--lift-format", "ail",
+            "--pcode-language", "eBPF:LE:64:default",
+            "--num-inst", "4",
+        ]
+
+    def test_angr_compare_decompilers_batches_ghidra_and_oxidizer(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/sample.bin\n"
+                 "language_id: eBPF:LE:64:default")
+        httpx_mock.add_response(
+            url=_url("decompile_function?address=0x120&timeout=12"),
+            text="ghidra one")
+        httpx_mock.add_response(
+            url=_url("decompile_function?address=0x180&timeout=12"),
+            text="ghidra two")
+        calls = []
+
+        def fake_run(args, timeout):
+            calls.append((args, timeout))
+            return "oxidizer"
+
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+        out = bridge_module.angr_compare_decompilers(
+            "ram:00000120, ram:00000180",
+            timeout_per_function=12,
+            max_functions=2)
+
+        assert "ghidra one" in out
+        assert "ghidra two" in out
+        assert len(calls) == 2
+        assert calls[0] == ([
+            "--binary", "/tmp/sample.bin",
+            "--address", "0x120",
+            "--rust",
+            "--skip-rust-setup",
+            "--pcode-language", "eBPF:LE:64:default",
+        ], 12)
+
+    def test_angr_compare_decompilers_rejects_excessive_batch(
+            self, bridge_module):
+        out = bridge_module.angr_compare_decompilers(
+            "0x120",
+            binary_path="/tmp/sample.bin",
+            max_functions=999)
+
+        assert "max_functions must be between 1 and 25" in out
 
     def test_angryghidra_check_setup_missing_is_clear(
             self, bridge_module, monkeypatch):
@@ -409,6 +841,24 @@ class TestMutations:
             match_content=b"address=0x120&comment=hello",
             text="Comment set successfully")
         bridge_module.set_decomp_comment("0x120", "hello")
+
+    def test_get_comment(self, bridge_module, httpx_mock):
+        httpx_mock.add_response(
+            url=_url("get_comment?address=0x120&kind=decomp"),
+            json={
+                "address": "0x120",
+                "kind": "decomp",
+                "exists": True,
+                "comment": "existing note",
+            },
+        )
+
+        assert bridge_module.get_comment("0x120", "decomp") == {
+            "address": "0x120",
+            "kind": "decomp",
+            "exists": True,
+            "comment": "existing note",
+        }
 
     def test_set_disasm_comment(self, bridge_module, httpx_mock):
         httpx_mock.add_response(

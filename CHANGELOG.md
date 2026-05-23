@@ -8,6 +8,27 @@ This is a fork of [LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraM
 The "Unreleased" section accumulates changes since the upstream `v1-4` release
 (commit `27f316f`).
 
+## [Unreleased]
+
+### Added
+- **Expanded core angr MCP capabilities**: added `angr_reachability`,
+  `angr_cfg_summary`, `angr_callgraph_summary`, `angr_lift_block`,
+  `angr_solve_constraints_at`, and `angr_compare_decompilers`.
+- **AngryGhidra-first symbolic path search**: `angr_symbolic_find` now supports
+  `engine="auto"|"angryghidra"|"core"` and uses AngryGhidra when installed and
+  compatible with the request, while preserving the core helper fallback.
+- **Writeable angr annotations**: added `angr_annotate_symbolic_path` to run a
+  symbolic path search, preview recovered trace comments by default, and write
+  them only with explicit overwrite confirmation.
+- **angr safety caps**: bounded helper output, symbolic input sizes, execution
+  steps, summary output, lift size, and decompiler comparison batches.
+- **Richer symbolic solving**: `angr_solve_constraints_at` reaches a target
+  address, applies JSON-described register/memory/stdin/argv constraints, and
+  evaluates requested registers, memory, stdin, and symbolic inputs.
+- **IR and graph inspection**: MCP callers can now request VEX/AIL block
+  lifting, static CFG reachability, CFG summaries, and callgraph edge samples
+  without requiring AngryGhidra.
+
 ## [1.6.0] - 2026-05-23
 
 ### Added
