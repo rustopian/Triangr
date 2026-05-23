@@ -16,6 +16,8 @@ import argparse
 import logging
 import subprocess
 import tempfile
+import time
+import hashlib
 from urllib.parse import urljoin
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -65,6 +67,10 @@ ANGR_MAX_NUM_INST = 256
 ANGR_MAX_COMPARE_FUNCTIONS = 25
 ANGR_MAX_COMMENTS = 100
 ANGR_MAX_COMMENT_PREFIX_CHARS = 200
+ANGR_PREVIEW_CONFIRMATION_TTL_SECONDS = 600
+ANGR_PREVIEW_CONFIRMATION_MAX_ENTRIES = 128
+
+_angr_annotation_previews: dict[str, float] = {}
 
 def get_http_client():
     global _http_client
@@ -680,6 +686,59 @@ def extract_trace_addresses(output: str) -> list[str]:
             seen.add(address)
     return deduped
 
+def annotation_preview_token(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+def prune_annotation_previews(now: float | None = None) -> None:
+    if now is None:
+        now = time.time()
+    expired = [
+        token for token, timestamp in _angr_annotation_previews.items()
+        if now - timestamp > ANGR_PREVIEW_CONFIRMATION_TTL_SECONDS
+    ]
+    for token in expired:
+        _angr_annotation_previews.pop(token, None)
+    while len(_angr_annotation_previews) > ANGR_PREVIEW_CONFIRMATION_MAX_ENTRIES:
+        oldest = min(_angr_annotation_previews, key=_angr_annotation_previews.get)
+        _angr_annotation_previews.pop(oldest, None)
+
+def remember_annotation_preview(payload: dict) -> str:
+    now = time.time()
+    prune_annotation_previews(now)
+    token = annotation_preview_token(payload)
+    _angr_annotation_previews[token] = now
+    return token
+
+def validate_annotation_preview(payload: dict, preview_token: str) -> str:
+    prune_annotation_previews()
+    expected_token = annotation_preview_token(payload)
+    if not preview_token:
+        return missing_annotation_preview_message()
+    if preview_token != expected_token:
+        return (
+            "Refusing to write comments because preview_token does not match this exact "
+            "annotation request. Re-run the preview with the same arguments you want to "
+            "apply, then use the preview_token from that response."
+        )
+    if expected_token not in _angr_annotation_previews:
+        return (
+            "Refusing to write comments because no recent preview was found for this exact "
+            "annotation request. Preview confirmations expire after "
+            f"{ANGR_PREVIEW_CONFIRMATION_TTL_SECONDS // 60} minutes; re-run the preview "
+            "and retry with the new preview_token."
+        )
+    _angr_annotation_previews.pop(expected_token, None)
+    return ""
+
+def missing_annotation_preview_message() -> str:
+    return (
+        "Refusing to write comments because no matching preview token was provided. "
+        "First call angr_annotate_symbolic_path with the same arguments and "
+        "apply=False, overwrite_existing=False. Review the preview, then retry "
+        "with apply=True, overwrite_existing=True, and the preview_token from that response."
+    )
+
 @mcp.tool()
 def list_methods(offset: int = 0, limit: int = 100) -> list:
     """
@@ -1037,16 +1096,19 @@ def angr_annotate_symbolic_path(
     max_comments: int = 100,
     apply: bool = False,
     overwrite_existing: bool = False,
+    preview_token: str = "",
     timeout: int = 120,
     max_steps: int = 10000,
 ) -> str:
     """
     Run a symbolic path search and write path comments into the Ghidra program.
 
-    This endpoint previews by default. Set apply=True and
-    overwrite_existing=True to write comments, because the current Ghidra
-    comment endpoints replace existing comments. comment_kind may be "disasm",
-    "decomp", or "both"; comments are applied only when a trace/path is found.
+    This endpoint previews by default. To write comments, first review a preview
+    response, then call again with the same arguments, apply=True,
+    overwrite_existing=True, and the preview_token from that preview. The token
+    check is required because the current Ghidra comment endpoints replace
+    existing comments. comment_kind may be "disasm", "decomp", or "both";
+    comments are applied only when a trace/path is found.
     """
     if comment_kind not in {"disasm", "decomp", "both"}:
         return 'comment_kind must be one of: "disasm", "decomp", "both"'
@@ -1056,6 +1118,13 @@ def angr_annotate_symbolic_path(
     max_comments = _max_comments
     if len(comment_prefix) > ANGR_MAX_COMMENT_PREFIX_CHARS:
         return f"comment_prefix may contain at most {ANGR_MAX_COMMENT_PREFIX_CHARS} characters"
+    if apply and not overwrite_existing:
+        return (
+            "Refusing to write comments because Ghidra's comment endpoints replace existing comments. "
+            "Call with overwrite_existing=True to confirm after reviewing a preview."
+        )
+    if apply and overwrite_existing and not preview_token:
+        return missing_annotation_preview_message()
 
     result = angr_symbolic_find(
         find_address=find_address,
@@ -1086,12 +1155,60 @@ def angr_annotate_symbolic_path(
         f"{address}: {comment_prefix}: step {index}/{total} toward {normalized_target}"
         for index, address in enumerate(trace_addresses, start=1)
     ]
+    endpoints = []
+    if comment_kind in {"disasm", "both"}:
+        endpoints.append("set_disassembly_comment")
+    if comment_kind in {"decomp", "both"}:
+        endpoints.append("set_decompiler_comment")
+    planned_writes = [
+        {
+            "endpoint": endpoint,
+            "address": address,
+            "comment": f"{comment_prefix}: step {index}/{total} toward {normalized_target}",
+        }
+        for index, address in enumerate(trace_addresses, start=1)
+        for endpoint in endpoints
+    ]
+    preview_payload = {
+        "tool": "angr_annotate_symbolic_path",
+        "request": {
+            "find_address": normalize_ghidra_address(find_address),
+            "binary_path": binary_path,
+            "start_address": normalize_ghidra_address(start_address),
+            "avoid_addresses": ",".join(
+                normalize_ghidra_address(address)
+                for address in avoid_addresses.split(",")
+                if address.strip()
+            ),
+            "pcode_language": pcode_language,
+            "base_address": normalize_ghidra_address(base_address),
+            "raw_binary_arch": raw_binary_arch,
+            "auto_load_libs": auto_load_libs,
+            "stdin_bytes": stdin_bytes,
+            "argv_bytes": argv_bytes,
+            "symbolic_memory_json": symbolic_memory_json,
+            "memory_json": memory_json,
+            "registers_json": registers_json,
+            "engine": engine,
+            "comment_kind": comment_kind,
+            "comment_prefix": comment_prefix,
+            "max_comments": max_comments,
+            "timeout": max(1, timeout),
+            "max_steps": max_steps,
+        },
+        "trace_addresses": trace_addresses,
+        "planned_writes": planned_writes,
+    }
 
     if not apply:
+        token = remember_annotation_preview(preview_payload)
         return (
             f"{result}\n\n"
             f"Preview only: {len(trace_addresses)} trace comment(s) would be written. "
-            "Call with apply=True and overwrite_existing=True to write them.\n"
+            "Review the preview, then call with the same arguments, apply=True, "
+            f"overwrite_existing=True, and preview_token=\"{token}\" to write them. "
+            f"Preview tokens expire after {ANGR_PREVIEW_CONFIRMATION_TTL_SECONDS // 60} minutes.\n"
+            f"preview_token: {token}\n"
             + "\n".join(preview)
         )
     if not overwrite_existing:
@@ -1100,19 +1217,17 @@ def angr_annotate_symbolic_path(
             "Refusing to write comments because Ghidra's comment endpoints replace existing comments. "
             "Call with overwrite_existing=True to confirm."
         )
-
-    endpoints = []
-    if comment_kind in {"disasm", "both"}:
-        endpoints.append("set_disassembly_comment")
-    if comment_kind in {"decomp", "both"}:
-        endpoints.append("set_decompiler_comment")
+    preview_error = validate_annotation_preview(preview_payload, preview_token)
+    if preview_error:
+        return f"{result}\n\n{preview_error}"
 
     writes = []
-    for index, address in enumerate(trace_addresses, start=1):
-        comment = f"{comment_prefix}: step {index}/{total} toward {normalized_target}"
-        for endpoint in endpoints:
-            response = safe_post(endpoint, {"address": address, "comment": comment})
-            writes.append(f"{endpoint} {address}: {response}")
+    for planned_write in planned_writes:
+        response = safe_post(
+            planned_write["endpoint"],
+            {"address": planned_write["address"], "comment": planned_write["comment"]},
+        )
+        writes.append(f"{planned_write['endpoint']} {planned_write['address']}: {response}")
 
     return (
         f"{result}\n\n"
