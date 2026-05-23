@@ -241,6 +241,162 @@ def split_addresses(addresses: str, max_addresses: int) -> list[str]:
     ]
     return result[:max(1, max_addresses)]
 
+def normalize_angryghidra_map_values(
+    parsed: dict,
+    symbolic_prefix_ok: bool = False,
+    integers_as_hex: bool = False,
+) -> dict:
+    normalized = {}
+    for key, value in parsed.items():
+        if isinstance(value, int) and integers_as_hex:
+            normalized[str(key)] = hex(value)
+        elif symbolic_prefix_ok and isinstance(value, str) and value.startswith("sv"):
+            normalized[str(key)] = value
+        else:
+            normalized[str(key)] = str(value)
+    return normalized
+
+def make_angryghidra_arguments(argv_bytes: str) -> dict:
+    arguments = {}
+    for index, length in enumerate((part.strip() for part in argv_bytes.split(",")), start=1):
+        if length:
+            arguments[str(index)] = length
+    return arguments
+
+def run_angryghidra_options(options: dict, timeout: int) -> str:
+    script = find_angryghidra_script()
+    if not script:
+        return angryghidra_missing_message()
+
+    python = os.environ.get("ANGRYGHIDRA_PYTHON") or os.environ.get("GHIDRA_MCP_ANGR_PYTHON") or default_angr_python()
+    options_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix="-angryghidra.json", delete=False) as options_file:
+            json.dump(options, options_file)
+            options_path = options_file.name
+        completed = subprocess.run(
+            [python, script, options_path],
+            capture_output=True,
+            text=True,
+            timeout=max(1, timeout),
+            check=False,
+        )
+    except FileNotFoundError as e:
+        return f"Failed to start AngryGhidra: {e}"
+    except subprocess.TimeoutExpired:
+        return f"AngryGhidra timed out after {timeout} seconds"
+    finally:
+        if options_path:
+            try:
+                os.unlink(options_path)
+            except OSError:
+                pass
+
+    output = completed.stdout.strip()
+    errors = completed.stderr.strip()
+    if completed.returncode == 0:
+        return output if output else "(AngryGhidra returned no solution)"
+
+    details = output
+    if errors:
+        details = f"{details}\n\nstderr:\n{errors}" if details else f"stderr:\n{errors}"
+    return f"AngryGhidra failed with exit code {completed.returncode}\n\n{details}".strip()
+
+def build_angryghidra_symbolic_options(
+    find_address: str,
+    binary_path: str,
+    start_address: str = "",
+    avoid_addresses: str = "",
+    base_address: str = "",
+    raw_binary_arch: str = "",
+    auto_load_libs: bool = False,
+    argv_bytes: str = "",
+    symbolic_memory_json: str = "",
+    memory_json: str = "",
+    registers_json: str = "",
+) -> tuple[dict | None, str]:
+    if not binary_path:
+        return None, "No binary_path provided and Ghidra did not return an executable_path"
+    if not base_address:
+        program_info = parse_key_value_lines(safe_get("program_info"))
+        base_address = program_info.get("min_address", "0x0")
+
+    try:
+        options = {
+            "binary_file": binary_path,
+            "base_address": normalize_ghidra_address(base_address),
+            "find_address": normalize_ghidra_address(find_address),
+            "auto_load_libs": auto_load_libs,
+        }
+        if start_address:
+            options["blank_state"] = normalize_ghidra_address(start_address)
+        if avoid_addresses:
+            options["avoid_address"] = ",".join(
+                normalize_ghidra_address(address)
+                for address in avoid_addresses.split(",")
+                if address.strip()
+            )
+        if raw_binary_arch:
+            options["raw_binary_arch"] = raw_binary_arch
+        arguments = make_angryghidra_arguments(argv_bytes)
+        if arguments:
+            options["arguments"] = arguments
+        for key, value, field_name, symbolic_prefix_ok, integers_as_hex in [
+            ("vectors", symbolic_memory_json, "symbolic_memory_json", False, False),
+            ("mem_store", memory_json, "memory_json", False, True),
+            ("regs_vals", registers_json, "registers_json", True, True),
+        ]:
+            parsed = parse_optional_json(value, field_name)
+            if parsed is not None:
+                if not isinstance(parsed, dict):
+                    return None, f"{field_name} must be a JSON object"
+                options[key] = normalize_angryghidra_map_values(
+                    parsed,
+                    symbolic_prefix_ok,
+                    integers_as_hex,
+                )
+    except ValueError as e:
+        return None, str(e)
+
+    return options, ""
+
+def angryghidra_symbolic_unsupported_reason(
+    stdin_bytes: int,
+    pcode_language: str = "",
+    raw_binary_arch: str = "",
+) -> str:
+    unsupported = []
+    if stdin_bytes > 0:
+        unsupported.append("symbolic stdin is not supported by AngryGhidra's native script")
+    if pcode_language and not raw_binary_arch:
+        unsupported.append("p-code language loading requires the core angr helper unless raw_binary_arch is provided")
+    return "; ".join(unsupported)
+
+def extract_trace_addresses(output: str) -> list[str]:
+    addresses = []
+    in_core_path = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped == "path:":
+            in_core_path = True
+            continue
+        if stripped.startswith("t:"):
+            addresses.append(normalize_ghidra_address(stripped[2:]))
+            in_core_path = False
+            continue
+        if in_core_path and stripped.startswith("0x"):
+            addresses.append(normalize_ghidra_address(stripped.split()[0]))
+            continue
+        if in_core_path and stripped and not stripped.startswith("..."):
+            in_core_path = False
+    deduped = []
+    seen = set()
+    for address in addresses:
+        if address not in seen:
+            deduped.append(address)
+            seen.add(address)
+    return deduped
+
 @mcp.tool()
 def list_methods(offset: int = 0, limit: int = 100) -> list:
     """
@@ -443,19 +599,24 @@ def angr_symbolic_find(
     avoid_addresses: str = "",
     pcode_language: str = "",
     base_address: str = "",
+    raw_binary_arch: str = "",
+    auto_load_libs: bool = False,
     stdin_bytes: int = 0,
     argv_bytes: str = "",
     symbolic_memory_json: str = "",
     memory_json: str = "",
     registers_json: str = "",
+    engine: str = "auto",
     timeout: int = 120,
     max_steps: int = 10000,
 ) -> str:
     """
-    Use core angr symbolic execution to find a path to an address.
+    Find a symbolic execution path to an address.
 
-    This is independent of AngryGhidra. It can make stdin/argv symbolic, seed
-    symbolic memory, seed concrete memory/register values, and avoid addresses.
+    engine="auto" prefers AngryGhidra when it is installed and the request fits
+    AngryGhidra's native script, then falls back to the core angr helper. Use
+    engine="angryghidra" to require AngryGhidra, or engine="core" to force the
+    bridge's direct angr helper.
 
     Args:
         find_address: Address to reach.
@@ -466,6 +627,8 @@ def angr_symbolic_find(
         avoid_addresses: Optional comma-separated addresses to avoid.
         pcode_language: Optional pypcode language id.
         base_address: Optional loader base address.
+        raw_binary_arch: Optional AngryGhidra raw blob architecture.
+        auto_load_libs: Whether AngryGhidra/core angr should load shared libs.
         stdin_bytes: Symbolic stdin length in bytes.
         argv_bytes: Comma-separated symbolic argv byte lengths, e.g. "8,16".
         symbolic_memory_json: JSON object mapping address to symbolic byte
@@ -473,11 +636,17 @@ def angr_symbolic_find(
         memory_json: JSON object mapping address to concrete integer/hex value.
         registers_json: JSON object mapping register names to values or "svN"
                         for an N-byte symbolic register.
+        engine: "auto", "angryghidra", or "core".
         timeout: Maximum helper runtime in seconds.
-        max_steps: Maximum symbolic execution steps. Use 0 for unbounded.
+        max_steps: Maximum core-helper symbolic execution steps. AngryGhidra's
+                   native script runs until it finds a path or the timeout hits.
     """
+    requested_engine = engine.lower().strip()
+    if requested_engine not in {"auto", "angryghidra", "core"}:
+        return 'engine must be one of: "auto", "angryghidra", "core"'
+
     program_info = {}
-    if not binary_path or not pcode_language:
+    if not binary_path or not pcode_language or not base_address:
         program_info = parse_key_value_lines(safe_get("program_info"))
     if not binary_path:
         binary_path = program_info.get("executable_path", "")
@@ -485,6 +654,37 @@ def angr_symbolic_find(
         return "No binary_path provided and Ghidra did not return an executable_path"
     if not pcode_language:
         pcode_language = infer_pcode_language(program_info.get("language_id"))
+    if not base_address:
+        base_address = program_info.get("min_address", "")
+
+    if requested_engine in {"auto", "angryghidra"}:
+        script = find_angryghidra_script()
+        unsupported = angryghidra_symbolic_unsupported_reason(
+            stdin_bytes,
+            pcode_language,
+            raw_binary_arch,
+        )
+        if script and not unsupported:
+            options, error = build_angryghidra_symbolic_options(
+                find_address=find_address,
+                binary_path=binary_path,
+                start_address=start_address,
+                avoid_addresses=avoid_addresses,
+                base_address=base_address,
+                raw_binary_arch=raw_binary_arch,
+                auto_load_libs=auto_load_libs,
+                argv_bytes=argv_bytes,
+                symbolic_memory_json=symbolic_memory_json,
+                memory_json=memory_json,
+                registers_json=registers_json,
+            )
+            if error:
+                return error
+            return "engine: AngryGhidra\n" + run_angryghidra_options(options, timeout)
+        if requested_engine == "angryghidra":
+            if not script:
+                return angryghidra_missing_message()
+            return f"AngryGhidra cannot run this request: {unsupported}"
 
     args = [
         "--binary", binary_path,
@@ -503,6 +703,8 @@ def angr_symbolic_find(
         args.extend(["--pcode-language", pcode_language])
     if base_address:
         args.extend(["--base-address", normalize_ghidra_address(base_address)])
+    if auto_load_libs:
+        args.append("--auto-load-libs")
     if stdin_bytes > 0:
         args.extend(["--stdin-bytes", str(stdin_bytes)])
     if argv_bytes:
@@ -516,7 +718,84 @@ def angr_symbolic_find(
         if parsed is not None:
             args.extend([option, json.dumps(parsed)])
 
-    return run_angr_helper(args, max(1, timeout))
+    return "engine: core angr\n" + run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angr_annotate_symbolic_path(
+    find_address: str,
+    binary_path: str = "",
+    start_address: str = "",
+    avoid_addresses: str = "",
+    pcode_language: str = "",
+    base_address: str = "",
+    raw_binary_arch: str = "",
+    auto_load_libs: bool = False,
+    stdin_bytes: int = 0,
+    argv_bytes: str = "",
+    symbolic_memory_json: str = "",
+    memory_json: str = "",
+    registers_json: str = "",
+    engine: str = "auto",
+    comment_kind: str = "disasm",
+    comment_prefix: str = "angr symbolic path",
+    max_comments: int = 100,
+    timeout: int = 120,
+    max_steps: int = 10000,
+) -> str:
+    """
+    Run a symbolic path search and write path comments into the Ghidra program.
+
+    This is an explicit write endpoint. comment_kind may be "disasm",
+    "decomp", or "both"; comments are applied only when a trace/path is found.
+    The underlying path search prefers AngryGhidra in engine="auto" when the
+    request fits AngryGhidra's native script.
+    """
+    if comment_kind not in {"disasm", "decomp", "both"}:
+        return 'comment_kind must be one of: "disasm", "decomp", "both"'
+
+    result = angr_symbolic_find(
+        find_address=find_address,
+        binary_path=binary_path,
+        start_address=start_address,
+        avoid_addresses=avoid_addresses,
+        pcode_language=pcode_language,
+        base_address=base_address,
+        raw_binary_arch=raw_binary_arch,
+        auto_load_libs=auto_load_libs,
+        stdin_bytes=stdin_bytes,
+        argv_bytes=argv_bytes,
+        symbolic_memory_json=symbolic_memory_json,
+        memory_json=memory_json,
+        registers_json=registers_json,
+        engine=engine,
+        timeout=timeout,
+        max_steps=max_steps,
+    )
+
+    trace_addresses = extract_trace_addresses(result)[: max(1, max_comments)]
+    if not trace_addresses:
+        return f"{result}\n\nNo trace addresses found; no comments were written."
+
+    endpoints = []
+    if comment_kind in {"disasm", "both"}:
+        endpoints.append("set_disassembly_comment")
+    if comment_kind in {"decomp", "both"}:
+        endpoints.append("set_decompiler_comment")
+
+    writes = []
+    total = len(trace_addresses)
+    normalized_target = normalize_ghidra_address(find_address)
+    for index, address in enumerate(trace_addresses, start=1):
+        comment = f"{comment_prefix}: step {index}/{total} toward {normalized_target}"
+        for endpoint in endpoints:
+            response = safe_post(endpoint, {"address": address, "comment": comment})
+            writes.append(f"{endpoint} {address}: {response}")
+
+    return (
+        f"{result}\n\n"
+        f"Annotated {len(trace_addresses)} trace address(es) with {len(writes)} comment write(s).\n"
+        + "\n".join(writes)
+    )
 
 @mcp.tool()
 def angr_solve_constraints_at(
@@ -794,8 +1073,7 @@ def angryghidra_symbolic_execute(
     not installed, this returns a clear error and leaves all other bridge tools
     working normally.
     """
-    script = find_angryghidra_script()
-    if not script:
+    if not find_angryghidra_script():
         return angryghidra_missing_message()
 
     program_info = {}
@@ -839,39 +1117,7 @@ def angryghidra_symbolic_execute(
     except ValueError as e:
         return str(e)
 
-    python = os.environ.get("ANGRYGHIDRA_PYTHON") or os.environ.get("GHIDRA_MCP_ANGR_PYTHON") or default_angr_python()
-    options_path = ""
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix="-angryghidra.json", delete=False) as options_file:
-            json.dump(options, options_file)
-            options_path = options_file.name
-        completed = subprocess.run(
-            [python, script, options_path],
-            capture_output=True,
-            text=True,
-            timeout=max(1, timeout),
-            check=False,
-        )
-    except FileNotFoundError as e:
-        return f"Failed to start AngryGhidra: {e}"
-    except subprocess.TimeoutExpired:
-        return f"AngryGhidra timed out after {timeout} seconds"
-    finally:
-        if options_path:
-            try:
-                os.unlink(options_path)
-            except OSError:
-                pass
-
-    output = completed.stdout.strip()
-    errors = completed.stderr.strip()
-    if completed.returncode == 0:
-        return output if output else "(AngryGhidra returned no solution)"
-
-    details = output
-    if errors:
-        details = f"{details}\n\nstderr:\n{errors}" if details else f"stderr:\n{errors}"
-    return f"AngryGhidra failed with exit code {completed.returncode}\n\n{details}".strip()
+    return run_angryghidra_options(options, timeout)
 
 @mcp.tool()
 def decompile_by_addr(address: str, timeout: int = 120) -> str:

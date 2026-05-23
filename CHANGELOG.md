@@ -14,6 +14,11 @@ The "Unreleased" section accumulates changes since the upstream `v1-4` release
 - **Expanded core angr MCP capabilities**: added `angr_reachability`,
   `angr_cfg_summary`, `angr_callgraph_summary`, `angr_lift_block`,
   `angr_solve_constraints_at`, and `angr_compare_decompilers`.
+- **AngryGhidra-first symbolic path search**: `angr_symbolic_find` now supports
+  `engine="auto"|"angryghidra"|"core"` and uses AngryGhidra when installed and
+  compatible with the request, while preserving the core helper fallback.
+- **Writeable angr annotations**: added `angr_annotate_symbolic_path` to run a
+  symbolic path search and write the recovered trace into Ghidra comments.
 - **Richer symbolic solving**: `angr_solve_constraints_at` reaches a target
   address, applies JSON-described register/memory/stdin/argv constraints, and
   evaluates requested registers, memory, stdin, and symbolic inputs.

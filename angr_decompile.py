@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import traceback
+from collections import deque
 from contextlib import redirect_stderr
 
 BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -45,11 +46,17 @@ def patch_elf_pcode_loader(pcode_language: str) -> None:
     ELF.extract_arch = staticmethod(extract_arch_with_pcode_fallback)
 
 
-def make_project(binary_path: str, pcode_language: str, rust: bool, base_address: str = ""):
+def make_project(
+    binary_path: str,
+    pcode_language: str,
+    rust: bool,
+    base_address: str = "",
+    auto_load_libs: bool = False,
+):
     import angr
     import archinfo
 
-    kwargs = {"auto_load_libs": False}
+    kwargs = {"auto_load_libs": auto_load_libs}
     main_opts = {}
     if pcode_language:
         patch_elf_pcode_loader(pcode_language)
@@ -145,7 +152,13 @@ def setup_symbolic_execution(args: argparse.Namespace, target_value: str):
 
     target_addr = parse_address(target_value)
     avoid = [parse_address(value) for value in args.avoid_address.split(",") if value.strip()]
-    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+    project = make_project(
+        args.binary,
+        args.pcode_language,
+        rust=False,
+        base_address=args.base_address,
+        auto_load_libs=args.auto_load_libs,
+    )
 
     argv = [args.binary]
     symbolic_argv = []
@@ -308,7 +321,13 @@ def run_check(args: argparse.Namespace) -> int:
     print(f"python: {sys.executable}")
     print(f"angr: {angr.__version__}")
     if args.binary:
-        project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+        project = make_project(
+            args.binary,
+            args.pcode_language,
+            rust=False,
+            base_address=args.base_address,
+            auto_load_libs=args.auto_load_libs,
+        )
         print(f"binary: {args.binary}")
         print(f"arch: {project.arch}")
         print(f"min_addr: {project.loader.main_object.min_addr:#x}")
@@ -416,8 +435,14 @@ def run_solve_at(args: argparse.Namespace) -> int:
 def run_reachability(args: argparse.Namespace) -> int:
     source = parse_address(args.reachability_from)
     target = parse_address(args.reachability_to)
-    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
-    cfg = build_cfg(project, args, function_starts=[source])
+    project = make_project(
+        args.binary,
+        args.pcode_language,
+        rust=False,
+        base_address=args.base_address,
+        auto_load_libs=args.auto_load_libs,
+    )
+    cfg = build_cfg(project, args, function_starts=None if args.complete_cfg else [source])
     source_node = get_cfg_node(cfg, source)
     target_node = get_cfg_node(cfg, target)
 
@@ -437,10 +462,10 @@ def run_reachability(args: argparse.Namespace) -> int:
         print("reason: target node not found")
         return 2
 
-    queue = [source_node]
+    queue = deque([source_node])
     predecessor = {source_node: None}
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         if node == target_node:
             break
         for successor in cfg.graph.successors(node):
@@ -471,7 +496,13 @@ def run_reachability(args: argparse.Namespace) -> int:
 
 
 def run_cfg_summary(args: argparse.Namespace) -> int:
-    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+    project = make_project(
+        args.binary,
+        args.pcode_language,
+        rust=False,
+        base_address=args.base_address,
+        auto_load_libs=args.auto_load_libs,
+    )
     function_addr = parse_address(args.function_address) if args.function_address else None
     cfg = build_cfg(project, args, function_starts=[function_addr] if function_addr is not None else None)
 
@@ -508,7 +539,13 @@ def run_cfg_summary(args: argparse.Namespace) -> int:
 
 
 def run_callgraph_summary(args: argparse.Namespace) -> int:
-    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+    project = make_project(
+        args.binary,
+        args.pcode_language,
+        rust=False,
+        base_address=args.base_address,
+        auto_load_libs=args.auto_load_libs,
+    )
     build_cfg(project, args)
     callgraph = project.kb.functions.callgraph
     print(f"binary: {args.binary}")
@@ -530,7 +567,13 @@ def run_lift_block(args: argparse.Namespace) -> int:
     from angr.ailment.manager import Manager
 
     address = parse_address(args.lift_block)
-    project = make_project(args.binary, args.pcode_language, rust=False, base_address=args.base_address)
+    project = make_project(
+        args.binary,
+        args.pcode_language,
+        rust=False,
+        base_address=args.base_address,
+        auto_load_libs=args.auto_load_libs,
+    )
     block = make_block(project, address, args.block_size, args.num_inst)
 
     print(f"binary: {args.binary}")
@@ -557,7 +600,13 @@ def run_decompile(args: argparse.Namespace) -> int:
     import angr  # noqa: F401
 
     target_addr = parse_address(args.address)
-    project = make_project(args.binary, args.pcode_language, args.rust, base_address=args.base_address)
+    project = make_project(
+        args.binary,
+        args.pcode_language,
+        args.rust,
+        base_address=args.base_address,
+        auto_load_libs=args.auto_load_libs,
+    )
 
     cfg_kwargs = {
         "normalize": True,
@@ -611,6 +660,7 @@ def main() -> int:
     parser.add_argument("--address", help="Function entry address")
     parser.add_argument("--pcode-language", default="", help="Optional pypcode language id")
     parser.add_argument("--base-address", default="", help="Optional image base for raw/blob-style loads")
+    parser.add_argument("--auto-load-libs", action="store_true", help="Ask angr to load imported libraries")
     parser.add_argument("--skip-rust-setup", action="store_true", help="Skip Rust recovery setup analyses")
     parser.add_argument("--check", action="store_true", help="Only verify angr imports and optional binary load")
     parser.add_argument("--symbolic-find", help="Find an execution path to this address")

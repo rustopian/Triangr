@@ -271,7 +271,7 @@ class TestAngrIntegrations:
             "--pcode-language", "eBPF:LE:64:default",
         ]
 
-    def test_angr_symbolic_find_uses_core_angr_without_angryghidra(
+    def test_angr_symbolic_find_falls_back_to_core_when_angryghidra_cannot_represent_request(
             self, bridge_module, httpx_mock, monkeypatch):
         httpx_mock.add_response(
             url=_url("program_info"),
@@ -295,7 +295,7 @@ class TestAngrIntegrations:
             timeout=55,
             max_steps=123)
 
-        assert out == "found: true"
+        assert out == "engine: core angr\nfound: true"
         assert calls["timeout"] == 55
         assert calls["args"] == [
             "--binary", "/tmp/eternal.so",
@@ -308,6 +308,90 @@ class TestAngrIntegrations:
             "--symbolic-memory-json", '{"0x2000": 32}',
             "--registers-json", '{"r1": "sv8", "r2": "0x10"}',
         ]
+
+    def test_angr_symbolic_find_prefers_angryghidra_when_available(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/a.out\n"
+                 "language_id: x86:LE:64:default\n"
+                 "min_address: 0x400000")
+        monkeypatch.setattr(bridge_module, "find_angryghidra_script", lambda: "/opt/angryghidra.py")
+        calls = {}
+
+        def fake_run(options, timeout):
+            calls["options"] = options
+            calls["timeout"] = timeout
+            return "t:0x401000\nt:0x401020\nargv[1] = b'ok'"
+
+        monkeypatch.setattr(bridge_module, "run_angryghidra_options", fake_run)
+        out = bridge_module.angr_symbolic_find(
+            find_address="0x401020",
+            start_address="0x401000",
+            argv_bytes="4",
+            symbolic_memory_json='{"0x404000": 8}',
+            memory_json='{"0x405000": "0x41"}',
+            registers_json='{"rax": "sv8"}',
+            timeout=44)
+
+        assert out.startswith("engine: AngryGhidra\n")
+        assert calls["timeout"] == 44
+        assert calls["options"] == {
+            "binary_file": "/tmp/a.out",
+            "base_address": "0x400000",
+            "find_address": "0x401020",
+            "auto_load_libs": False,
+            "blank_state": "0x401000",
+            "arguments": {"1": "4"},
+            "vectors": {"0x404000": "8"},
+            "mem_store": {"0x405000": "0x41"},
+            "regs_vals": {"rax": "sv8"},
+        }
+
+    def test_angr_symbolic_find_forced_angryghidra_missing_is_clear(
+            self, bridge_module, httpx_mock, monkeypatch):
+        httpx_mock.add_response(
+            url=_url("program_info"),
+            text="executable_path: /tmp/a.out\n"
+                 "language_id: x86:LE:64:default\n"
+                 "min_address: 0x400000")
+        monkeypatch.setattr(bridge_module, "find_angryghidra_script", lambda: "")
+
+        out = bridge_module.angr_symbolic_find(
+            find_address="0x401020",
+            engine="angryghidra")
+
+        assert "AngryGhidra is not installed or configured" in out
+
+    def test_angr_annotate_symbolic_path_writes_trace_comments(
+            self, bridge_module, httpx_mock, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000\nt:0x401020")
+        httpx_mock.add_response(
+            method="POST",
+            url=_url("set_disassembly_comment"),
+            match_content=(
+                b"address=0x401000&comment=angr+symbolic+path%3A+step+1%2F2+"
+                b"toward+0x401020"
+            ),
+            text="Comment set successfully")
+        httpx_mock.add_response(
+            method="POST",
+            url=_url("set_disassembly_comment"),
+            match_content=(
+                b"address=0x401020&comment=angr+symbolic+path%3A+step+2%2F2+"
+                b"toward+0x401020"
+            ),
+            text="Comment set successfully")
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            comment_kind="disasm")
+
+        assert "Annotated 2 trace address(es)" in out
+        assert "set_disassembly_comment 0x401000: Comment set successfully" in out
 
     def test_angr_solve_constraints_at_builds_rich_solver_args(
             self, bridge_module, httpx_mock, monkeypatch):
@@ -352,12 +436,13 @@ class TestAngrIntegrations:
             text="executable_path: /tmp/eternal.so\n"
                  "language_id: eBPF:LE:64:default")
         calls = {}
-        monkeypatch.setattr(
-            bridge_module,
-            "run_angr_helper",
-            lambda args, timeout: calls.setdefault("data", (args, timeout)) or "reachable: true")
+        def fake_run(args, timeout):
+            calls["data"] = (args, timeout)
+            return "reachable: true"
 
-        bridge_module.angr_reachability(
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+
+        out = bridge_module.angr_reachability(
             "ram:00000120",
             "ram:00000180",
             complete_cfg=True,
@@ -365,6 +450,7 @@ class TestAngrIntegrations:
             summary_limit=7,
             timeout=99)
 
+        assert out == "reachable: true"
         args, timeout = calls["data"]
         assert timeout == 99
         assert args == [
@@ -383,16 +469,18 @@ class TestAngrIntegrations:
             text="executable_path: /tmp/eternal.so\n"
                  "language_id: eBPF:LE:64:default")
         calls = {}
-        monkeypatch.setattr(
-            bridge_module,
-            "run_angr_helper",
-            lambda args, timeout: calls.setdefault("data", (args, timeout)) or "cfg")
+        def fake_run(args, timeout):
+            calls["data"] = (args, timeout)
+            return "cfg"
 
-        bridge_module.angr_cfg_summary(
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+
+        out = bridge_module.angr_cfg_summary(
             function_address="ram:00000120",
             summary_limit=5,
             timeout=66)
 
+        assert out == "cfg"
         args, timeout = calls["data"]
         assert timeout == 66
         assert args == [
@@ -410,13 +498,15 @@ class TestAngrIntegrations:
             text="executable_path: /tmp/eternal.so\n"
                  "language_id: eBPF:LE:64:default")
         calls = {}
-        monkeypatch.setattr(
-            bridge_module,
-            "run_angr_helper",
-            lambda args, timeout: calls.setdefault("data", (args, timeout)) or "callgraph")
+        def fake_run(args, timeout):
+            calls["data"] = (args, timeout)
+            return "callgraph"
 
-        bridge_module.angr_callgraph_summary(summary_limit=3, timeout=77)
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
 
+        out = bridge_module.angr_callgraph_summary(summary_limit=3, timeout=77)
+
+        assert out == "callgraph"
         args, timeout = calls["data"]
         assert timeout == 77
         assert args == [
@@ -433,17 +523,19 @@ class TestAngrIntegrations:
             text="executable_path: /tmp/eternal.so\n"
                  "language_id: eBPF:LE:64:default")
         calls = {}
-        monkeypatch.setattr(
-            bridge_module,
-            "run_angr_helper",
-            lambda args, timeout: calls.setdefault("data", (args, timeout)) or "AIL")
+        def fake_run(args, timeout):
+            calls["data"] = (args, timeout)
+            return "AIL"
 
-        bridge_module.angr_lift_block(
+        monkeypatch.setattr(bridge_module, "run_angr_helper", fake_run)
+
+        out = bridge_module.angr_lift_block(
             "ram:00000120",
             lift_format="ail",
             num_inst=4,
             timeout=33)
 
+        assert out == "AIL"
         args, timeout = calls["data"]
         assert timeout == 33
         assert args == [
