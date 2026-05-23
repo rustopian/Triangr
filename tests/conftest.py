@@ -40,6 +40,7 @@ def _reset_http_client(bridge_module):
     Per-test: clear the cached singleton so pytest-httpx intercepts cleanly.
     """
     bridge_module._http_client = None
+    bridge_module._angr_annotation_previews.clear()
     yield
     if bridge_module._http_client is not None:
         try:
@@ -47,3 +48,4 @@ def _reset_http_client(bridge_module):
         except Exception:
             pass
         bridge_module._http_client = None
+    bridge_module._angr_annotation_previews.clear()

@@ -22,6 +22,13 @@ def _url(endpoint: str) -> str:
     return BASE_URL + endpoint
 
 
+def _preview_token(output: str) -> str:
+    for line in output.splitlines():
+        if line.startswith("preview_token: "):
+            return line.split(": ", 1)[1]
+    raise AssertionError("preview_token not found")
+
+
 # ---------------------------------------------------------------------------
 # Listing endpoints (GET ?offset=&limit=)
 # ---------------------------------------------------------------------------
@@ -373,6 +380,7 @@ class TestAngrIntegrations:
         out = bridge_module.angr_annotate_symbolic_path(find_address="0x401020")
 
         assert "Preview only: 2 trace comment(s) would be written" in out
+        assert "preview_token: " in out
         assert "0x401000: angr symbolic path: step 1/2 toward 0x401020" in out
 
     def test_angr_annotate_symbolic_path_requires_overwrite_confirmation(
@@ -388,6 +396,41 @@ class TestAngrIntegrations:
 
         assert "Refusing to write comments" in out
         assert "overwrite_existing=True" in out
+
+    def test_angr_annotate_symbolic_path_requires_matching_preview_token(
+            self, bridge_module, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            apply=True,
+            overwrite_existing=True)
+
+        assert "no matching preview token" in out
+        assert "First call angr_annotate_symbolic_path" in out
+
+    def test_angr_annotate_symbolic_path_rejects_changed_call_after_preview(
+            self, bridge_module, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+        preview = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            comment_prefix="previewed path")
+        token = _preview_token(preview)
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            comment_prefix="changed path",
+            apply=True,
+            overwrite_existing=True,
+            preview_token=token)
+
+        assert "preview_token does not match this exact annotation request" in out
 
     def test_angr_annotate_symbolic_path_writes_trace_comments_with_confirmation(
             self, bridge_module, httpx_mock, monkeypatch):
@@ -412,11 +455,16 @@ class TestAngrIntegrations:
             ),
             text="Comment set successfully")
 
+        preview = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            comment_kind="disasm")
+        token = _preview_token(preview)
         out = bridge_module.angr_annotate_symbolic_path(
             find_address="0x401020",
             comment_kind="disasm",
             apply=True,
-            overwrite_existing=True)
+            overwrite_existing=True,
+            preview_token=token)
 
         assert "Annotated 2 trace address(es)" in out
         assert "set_disassembly_comment 0x401000: Comment set successfully" in out
