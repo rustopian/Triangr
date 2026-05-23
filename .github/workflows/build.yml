@@ -76,6 +76,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate installer script
+        run: |
+          bash -n scripts/install.sh
+          scripts/install.sh --help >/dev/null
+          scripts/install.sh --dry-run --no-install-deps --no-extension --no-angryghidra --prefix "$RUNNER_TEMP/triangr"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -89,3 +94,72 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Run pytest
         run: python -m pytest tests/test_bridge.py -v
+
+  installer-smoke:
+    # Exercises the real installer path, including Ghidra download, Python
+    # runtime install, angr importability, extension install, and optional
+    # AngryGhidra checkout/build when Gradle is available. Kept separate from
+    # python-tests because it is intentionally heavier and benefits from cache.
+    runs-on: ubuntu-latest
+    env:
+      TRIANGR_PREFIX: ${{ runner.temp }}/triangr
+      TRIANGR_CACHE: /home/runner/.cache/triangr-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache installer downloads and Gradle artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.TRIANGR_CACHE }}
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: triangr-installer-${{ runner.os }}-ghidra-12.0.4-${{ hashFiles('requirements.txt', 'pom.xml', 'scripts/install.sh') }}
+          restore-keys: |
+            triangr-installer-${{ runner.os }}-ghidra-12.0.4-
+
+      - name: Prime Python wheelhouse
+        run: |
+          mkdir -p "$TRIANGR_CACHE/wheels" "$TRIANGR_CACHE/pip"
+          python -m pip install --upgrade pip
+          python -m pip download --prefer-binary -r requirements.txt -d "$TRIANGR_CACHE/wheels"
+
+      - name: Run full installer
+        run: |
+          mkdir -p "$TRIANGR_CACHE"
+          if [ -d "$TRIANGR_CACHE/tools" ]; then
+            mkdir -p "$TRIANGR_PREFIX"
+            cp -a "$TRIANGR_CACHE/tools" "$TRIANGR_PREFIX/tools"
+          fi
+
+          PIP_CACHE_DIR="$TRIANGR_CACHE/pip" \
+          PIP_FIND_LINKS="$TRIANGR_CACHE/wheels" \
+          PIP_PREFER_BINARY=1 \
+            scripts/install.sh --prefix "$TRIANGR_PREFIX" --install-deps --yes
+
+          rm -rf "$TRIANGR_CACHE/tools"
+          mkdir -p "$TRIANGR_CACHE"
+          cp -a "$TRIANGR_PREFIX/tools" "$TRIANGR_CACHE/tools"
+
+      - name: Verify installer outputs
+        run: |
+          source "$TRIANGR_PREFIX/env.sh"
+          test -x "$GHIDRA_HOME/ghidraRun"
+          test -d "$GHIDRA_HOME/Ghidra/Extensions/GhidraMCP"
+          "$GHIDRA_MCP_ANGR_PYTHON" -c "import angr; print(angr.__version__)"
+          "$GHIDRA_MCP_ANGR_PYTHON" -m bridge_mcp_ghidra --help >/dev/null
+          test -f "$ANGRYGHIDRA_SCRIPT"

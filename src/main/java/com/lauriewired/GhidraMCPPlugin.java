@@ -70,13 +70,13 @@ import java.util.concurrent.atomic.AtomicReference;
     status = PluginStatus.RELEASED,
     packageName = ghidra.app.DeveloperPluginPackage.NAME,
     category = PluginCategoryNames.ANALYSIS,
-    shortDescription = "HTTP server plugin",
-    description = "Starts an embedded HTTP server to expose program data. Port configurable via Tool Options."
+    shortDescription = "Triangr HTTP server",
+    description = "Starts an embedded HTTP server to expose program data to MCP clients. Port configurable via Tool Options."
 )
 public class GhidraMCPPlugin extends Plugin {
 
     private HttpServer server;
-    private static final String OPTION_CATEGORY_NAME = "GhidraMCP HTTP Server";
+    private static final String OPTION_CATEGORY_NAME = "Triangr HTTP Server";
     private static final String PORT_OPTION_NAME = "Server Port";
     private static final int DEFAULT_PORT = 8080;
     private static final String HOST_OPTION_NAME = "Server Host IP/NAME";
@@ -99,7 +99,7 @@ public class GhidraMCPPlugin extends Plugin {
         Math.max(2, Runtime.getRuntime().availableProcessors()),
         r -> {
             Thread t = new Thread(r);
-            t.setName("GhidraMCP-Async-" + t.getId());
+            t.setName("Triangr-Async-" + t.getId());
             t.setDaemon(true);
             return t;
         });
@@ -174,7 +174,7 @@ public class GhidraMCPPlugin extends Plugin {
 
     public GhidraMCPPlugin(PluginTool tool) {
         super(tool);
-        Msg.info(this, "GhidraMCPPlugin loading...");
+        Msg.info(this, "Triangr plugin loading...");
 
         // Register the configuration option
         Options options = tool.getOptions(OPTION_CATEGORY_NAME);
@@ -193,7 +193,7 @@ public class GhidraMCPPlugin extends Plugin {
         catch (IOException e) {
             Msg.error(this, "Failed to start HTTP server", e);
         }
-        Msg.info(this, "GhidraMCPPlugin loaded!");
+        Msg.info(this, "Triangr plugin loaded!");
     }
 
     private void startServer() throws IOException {
@@ -817,12 +817,12 @@ public class GhidraMCPPlugin extends Plugin {
                 serverStartTime = System.currentTimeMillis();
                 lastRequestTimestamp = serverStartTime;
                 startWatchdog();
-                Msg.info(this, "GhidraMCP HTTP server started on port " + port);
+                Msg.info(this, "Triangr HTTP server started on port " + port);
             } catch (Exception e) {
                 Msg.error(this, "Failed to start HTTP server on port " + port + ". Port might be in use.", e);
                 server = null;
             }
-        }, "GhidraMCP-HTTP-Server").start();
+        }, "Triangr-HTTP-Server").start();
     }
 
     // ----------------------------------------------------------------------------------
@@ -2948,7 +2948,7 @@ public class GhidraMCPPlugin extends Plugin {
                     try { Thread.sleep(WATCHDOG_INTERVAL_MS); runWatchdogCheck(); }
                     catch (InterruptedException e) { break; }
                 }
-            }, "GhidraMCP-Watchdog");
+            }, "Triangr-Watchdog");
             watchdogThread.setDaemon(true);
             watchdogThread.start();
         }
@@ -2988,10 +2988,10 @@ public class GhidraMCPPlugin extends Plugin {
         }
         asyncTasks.clear();
         if (server != null) {
-            Msg.info(this, "Stopping GhidraMCP HTTP server...");
+            Msg.info(this, "Stopping Triangr HTTP server...");
             server.stop(1);
             server = null;
-            Msg.info(this, "GhidraMCP HTTP server stopped.");
+            Msg.info(this, "Triangr HTTP server stopped.");
         }
         super.dispose();
     }
