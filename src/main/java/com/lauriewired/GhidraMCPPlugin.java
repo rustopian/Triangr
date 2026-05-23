@@ -64,6 +64,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 @PluginInfo(
     status = PluginStatus.RELEASED,
@@ -398,6 +399,33 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> qparams = parseQueryParams(exchange);
             String address = qparams.get("address");
             sendResponse(exchange, disassembleFunction(address));
+        });
+
+        server.createContext("/get_comment", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            String kind = qparams.getOrDefault("kind", "disasm");
+            Integer commentType = commentTypeForKind(kind);
+            if (address == null || address.isEmpty()) {
+                sendJsonResponse(exchange, 400, "{\"error\":\"address is required\"}");
+                return;
+            }
+            if (commentType == null) {
+                sendJsonResponse(exchange, 400, "{\"error\":\"kind must be disasm or decomp\"}");
+                return;
+            }
+
+            CommentLookupResult result = getCommentAtAddress(address, commentType);
+            if (result.errorMessage != null) {
+                sendJsonResponse(exchange, 400, "{\"error\":\"" + jsonEscape(result.errorMessage) + "\"}");
+                return;
+            }
+
+            String json = "{\"address\":\"" + jsonEscape(address) + "\","
+                + "\"kind\":\"" + jsonEscape(kind) + "\","
+                + "\"exists\":" + (result.comment != null) + ","
+                + "\"comment\":\"" + jsonEscape(result.comment == null ? "" : result.comment) + "\"}";
+            sendJsonResponse(exchange, json);
         });
 
         server.createContext("/set_decompiler_comment", exchange -> {
@@ -1392,6 +1420,61 @@ public class GhidraMCPPlugin extends Plugin {
      */
     private boolean setDisassemblyComment(String addressStr, String comment) {
         return setCommentAtAddress(addressStr, comment, CodeUnit.EOL_COMMENT, "Set disassembly comment");
+    }
+
+    private Integer commentTypeForKind(String kind) {
+        if ("disasm".equals(kind)) {
+            return CodeUnit.EOL_COMMENT;
+        }
+        if ("decomp".equals(kind)) {
+            return CodeUnit.PRE_COMMENT;
+        }
+        return null;
+    }
+
+    private static class CommentLookupResult {
+        private final String comment;
+        private final String errorMessage;
+
+        CommentLookupResult(String comment, String errorMessage) {
+            this.comment = comment;
+            this.errorMessage = errorMessage;
+        }
+    }
+
+    /**
+     * Read a comment that a set_*_comment endpoint would replace.
+     */
+    private CommentLookupResult getCommentAtAddress(String addressStr, int commentType) {
+        Program program = getCurrentProgram();
+        if (program == null) {
+            return new CommentLookupResult(null, "No current program");
+        }
+        if (addressStr == null || addressStr.isEmpty()) {
+            return new CommentLookupResult(null, "address is required");
+        }
+
+        AtomicReference<String> comment = new AtomicReference<>();
+        AtomicReference<String> error = new AtomicReference<>();
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    if (addr == null) {
+                        error.set("Invalid address: " + addressStr);
+                        return;
+                    }
+                    comment.set(program.getListing().getComment(commentType, addr));
+                } catch (Exception e) {
+                    error.set(e.getMessage());
+                    Msg.error(this, "Error getting comment", e);
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            error.set(e.getMessage());
+            Msg.error(this, "Failed to execute get comment on Swing thread", e);
+        }
+        return new CommentLookupResult(comment.get(), error.get());
     }
 
     /**
@@ -2808,6 +2891,14 @@ public class GhidraMCPPlugin extends Plugin {
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
         }
+    }
+
+    private static String jsonEscape(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r");
     }
     
     private void sendJsonResponse(HttpExchange exchange, int code, String json) throws IOException {
