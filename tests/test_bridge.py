@@ -243,6 +243,47 @@ class TestDecompile:
 
 class TestAngrIntegrations:
 
+    def test_default_angr_python_prefers_triangr_home(
+            self, bridge_module, tmp_path, monkeypatch):
+        triangr_home = tmp_path / "triangr"
+        python_path = triangr_home / "venv" / "bin" / "python"
+        python_path.parent.mkdir(parents=True)
+        python_path.write_text("")
+
+        monkeypatch.setenv("TRIANGR_HOME", str(triangr_home))
+
+        assert bridge_module.default_angr_python() == str(python_path)
+
+    def test_default_angr_python_checks_default_install_without_relative_probe(
+            self, bridge_module, monkeypatch):
+        checked = []
+        monkeypatch.delenv("TRIANGR_HOME", raising=False)
+        monkeypatch.setattr(
+            bridge_module,
+            "DEFAULT_TRIANGR_ANGR_PYTHON",
+            "/home/user/.local/share/triangr/venv/bin/python")
+
+        def fake_isfile(path):
+            checked.append(path)
+            return False
+
+        monkeypatch.setattr(bridge_module.os.path, "isfile", fake_isfile)
+
+        assert bridge_module.default_angr_python() == bridge_module.sys.executable
+        assert "venv/bin/python" not in checked
+        assert "/home/user/.local/share/triangr/venv/bin/python" in checked
+
+    def test_find_angryghidra_script_uses_triangr_home(
+            self, bridge_module, tmp_path, monkeypatch):
+        script = tmp_path / "triangr" / "AngryGhidra" / "angryghidra_script" / "angryghidra.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("# test")
+
+        monkeypatch.setenv("TRIANGR_HOME", str(tmp_path / "triangr"))
+        monkeypatch.setattr(bridge_module.glob, "glob", lambda _pattern: [])
+
+        assert bridge_module.find_angryghidra_script() == str(script)
+
     def test_angr_decompile_uses_program_info_defaults(
             self, bridge_module, httpx_mock, monkeypatch):
         httpx_mock.add_response(

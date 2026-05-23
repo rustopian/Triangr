@@ -391,9 +391,23 @@ export GHIDRA_MCP_ANGR_PYTHON="$PREFIX/venv/bin/python"
 export ANGRYGHIDRA_HOME="$PREFIX/AngryGhidra"
 export ANGRYGHIDRA_SCRIPT="$PREFIX/AngryGhidra/angryghidra_script/angryghidra.py"
 export ANGRYGHIDRA_PYTHON="$PREFIX/venv/bin/python"
-export PATH="$PREFIX/venv/bin:$ghidra_home:\$PATH"
+export PATH="$PREFIX/bin:$PREFIX/venv/bin:$ghidra_home:\$PATH"
 EOF
   echo "Wrote $env_file"
+}
+
+write_bridge_wrapper() {
+  local bin_dir="$PREFIX/bin"
+  local wrapper="$bin_dir/triangr-mcp"
+  mkdir -p "$bin_dir"
+  cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+source "$PREFIX/env.sh"
+exec "$PREFIX/venv/bin/bridge_mcp_ghidra" "\$@"
+EOF
+  chmod +x "$wrapper"
+  echo "Wrote $wrapper"
 }
 
 main() {
@@ -428,6 +442,7 @@ EOF
   install_triangr_extension
   install_angryghidra
   write_env
+  write_bridge_wrapper
 
   cat <<EOF
 
@@ -444,7 +459,7 @@ In Ghidra:
   4. Enable AngryGhidra under File -> Configure -> Miscellaneous if you want its UI.
 
 MCP bridge:
-  $REPO_DIR/bridge_mcp_ghidra.py
+  $PREFIX/bin/triangr-mcp
 
 Useful environment:
   $PREFIX/env.sh

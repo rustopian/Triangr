@@ -38,8 +38,11 @@ Triangr is a Model Context Protocol server and Ghidra plugin. It works with MCP
 clients that can launch a stdio server or connect to an SSE server, including
 Claude Code, Codex, Claude Desktop, Cline, 5ire, and other MCP-capable AI tools.
 
-The Python bridge entrypoint remains `bridge_mcp_ghidra` for compatibility. It
-speaks MCP on one side and Ghidra's local HTTP plugin on the other, defaulting to
+The Python bridge entrypoint remains `bridge_mcp_ghidra` for compatibility. The
+installer also creates `~/.local/share/triangr/bin/triangr-mcp`, a wrapper that
+loads the Triangr environment before starting the bridge, so GUI MCP clients do
+not need hand-written `ANGRYGHIDRA_PYTHON` paths. The bridge speaks MCP on one
+side and Ghidra's local HTTP plugin on the other, defaulting to
 `http://127.0.0.1:8080/`. The Ghidra plugin binds to localhost by default, has a
 configurable host and port, exposes a `/health` endpoint, and supports both
 interactive and long-running decompilation workflows.
@@ -78,10 +81,11 @@ angr gives the bridge executable reasoning beyond static project inspection:
 - Use AngryGhidra when installed for compatible symbolic execution workflows,
   while falling back to the core angr helper when appropriate.
 
-The bridge looks for angr through `GHIDRA_MCP_ANGR_PYTHON`, then local virtual
-environments, then the Python running the MCP bridge. AngryGhidra support is
-detected through `ANGRYGHIDRA_SCRIPT`, `ANGRYGHIDRA_HOME`, or a sibling
-`AngryGhidra` checkout.
+The bridge looks for angr through `GHIDRA_MCP_ANGR_PYTHON`, the default
+installer venv at `~/.local/share/triangr/venv`, local virtual environments,
+then the Python running the MCP bridge. AngryGhidra support is detected through
+`ANGRYGHIDRA_SCRIPT`, `ANGRYGHIDRA_HOME`, the default installer checkout under
+`~/.local/share/triangr/AngryGhidra`, or a sibling `AngryGhidra` checkout.
 
 ## Install Script
 
@@ -141,6 +145,7 @@ be re-run safely. It:
 - Clones and builds AngryGhidra when requested and Gradle is available.
 - Writes `env.sh` with `GHIDRA_HOME`, `GHIDRA_MCP_ANGR_PYTHON`,
   `ANGRYGHIDRA_HOME`, `ANGRYGHIDRA_SCRIPT`, and related paths.
+- Writes `bin/triangr-mcp`, a wrapper suitable for MCP client configs.
 
 The script does not edit Claude, Codex, Cline, or other MCP client configs.
 
@@ -151,6 +156,7 @@ After installation:
 ```bash
 source ~/.local/share/triangr/env.sh
 bridge_mcp_ghidra --help
+~/.local/share/triangr/bin/triangr-mcp --help
 python -c "import angr; print(angr.__version__)"
 "$GHIDRA_HOME/ghidraRun"
 ```
@@ -201,8 +207,9 @@ python3 -m venv .venv
 
 ## MCP Clients
 
-Any MCP client should work with Triangr. Examples below use the compatibility
-entrypoint, `bridge_mcp_ghidra`.
+Any MCP client should work with Triangr. If you used the installer, prefer the
+generated wrapper at `~/.local/share/triangr/bin/triangr-mcp`. It loads the
+right angr and AngryGhidra environment automatically.
 
 ### Claude Desktop
 
@@ -213,7 +220,7 @@ Go to `Claude` -> `Settings` -> `Developer` -> `Edit Config` ->
 {
   "mcpServers": {
     "triangr": {
-      "command": "bridge_mcp_ghidra",
+      "command": "/Users/YOUR_USER/.local/share/triangr/bin/triangr-mcp",
       "args": [
         "--ghidra-server",
         "http://127.0.0.1:8080/"
@@ -248,6 +255,12 @@ Run the MCP bridge over SSE:
 bridge_mcp_ghidra --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
 ```
 
+Or, with the installer wrapper:
+
+```bash
+~/.local/share/triangr/bin/triangr-mcp --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
+```
+
 Then add a remote server in Cline:
 
 1. Server Name: `Triangr`
@@ -259,7 +272,7 @@ Open 5ire and go to `Tools` -> `New`:
 
 1. Tool Key: `triangr`
 2. Name: `Triangr`
-3. Command: `bridge_mcp_ghidra`
+3. Command: `/Users/YOUR_USER/.local/share/triangr/bin/triangr-mcp`
 
 Use `python /ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py` instead if running from a
 checkout.
