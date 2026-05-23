@@ -202,6 +202,45 @@ def parse_optional_json(value: str, field_name: str):
     except json.JSONDecodeError as e:
         raise ValueError(f"{field_name} must be valid JSON: {e}") from e
 
+def resolve_angr_defaults(binary_path: str = "", pcode_language: str = "") -> tuple[str, str]:
+    program_info = {}
+    if not binary_path or not pcode_language:
+        program_info = parse_key_value_lines(safe_get("program_info"))
+    if not binary_path:
+        binary_path = program_info.get("executable_path", "")
+    if not pcode_language:
+        pcode_language = infer_pcode_language(program_info.get("language_id"))
+    return binary_path, pcode_language
+
+def require_binary_path(binary_path: str) -> str:
+    if not binary_path:
+        return "No binary_path provided and Ghidra did not return an executable_path"
+    return ""
+
+def append_common_angr_args(args: list[str], pcode_language: str = "", base_address: str = "") -> None:
+    if pcode_language:
+        args.extend(["--pcode-language", pcode_language])
+    if base_address:
+        args.extend(["--base-address", normalize_ghidra_address(base_address)])
+
+def append_json_arg(args: list[str], option: str, value: str, field_name: str) -> str:
+    try:
+        parsed = parse_optional_json(value, field_name)
+    except ValueError as e:
+        return str(e)
+    if parsed is not None:
+        args.extend([option, json.dumps(parsed)])
+    return ""
+
+def split_addresses(addresses: str, max_addresses: int) -> list[str]:
+    normalized = addresses.replace("\n", ",").replace(" ", ",")
+    result = [
+        normalize_ghidra_address(address)
+        for address in normalized.split(",")
+        if address.strip()
+    ]
+    return result[:max(1, max_addresses)]
+
 @mcp.tool()
 def list_methods(offset: int = 0, limit: int = 100) -> list:
     """
@@ -478,6 +517,248 @@ def angr_symbolic_find(
             args.extend([option, json.dumps(parsed)])
 
     return run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angr_solve_constraints_at(
+    address: str,
+    binary_path: str = "",
+    start_address: str = "",
+    avoid_addresses: str = "",
+    pcode_language: str = "",
+    base_address: str = "",
+    stdin_bytes: int = 0,
+    argv_bytes: str = "",
+    symbolic_memory_json: str = "",
+    memory_json: str = "",
+    registers_json: str = "",
+    constraints_json: str = "",
+    eval_registers: str = "",
+    eval_memory_json: str = "",
+    eval_stdin_bytes: int = 0,
+    timeout: int = 120,
+    max_steps: int = 10000,
+) -> str:
+    """
+    Find an execution path to an address, add constraints, and solve values.
+
+    constraints_json accepts a JSON list (or {"constraints": [...]}) of objects
+    like {"type":"reg","name":"r1","op":"==","value":"0x10"} or
+    {"type":"mem","address":"0x2000","length":4,"op":"!=","value_hex":"00000000"}.
+    Supported types are reg, mem, stdin, and argv.
+    """
+    binary_path, pcode_language = resolve_angr_defaults(binary_path, pcode_language)
+    missing = require_binary_path(binary_path)
+    if missing:
+        return missing
+
+    args = [
+        "--binary", binary_path,
+        "--solve-at", normalize_ghidra_address(address),
+        "--max-steps", str(max(0, max_steps)),
+    ]
+    if start_address:
+        args.extend(["--start-address", normalize_ghidra_address(start_address)])
+    if avoid_addresses:
+        normalized_avoid = ",".join(
+            normalize_ghidra_address(address_part)
+            for address_part in avoid_addresses.split(",")
+        )
+        args.extend(["--avoid-address", normalized_avoid])
+    append_common_angr_args(args, pcode_language, base_address)
+    if stdin_bytes > 0:
+        args.extend(["--stdin-bytes", str(stdin_bytes)])
+    if argv_bytes:
+        args.extend(["--argv-bytes", argv_bytes])
+    for option, value, field_name in [
+        ("--symbolic-memory-json", symbolic_memory_json, "symbolic_memory_json"),
+        ("--memory-json", memory_json, "memory_json"),
+        ("--registers-json", registers_json, "registers_json"),
+        ("--constraints-json", constraints_json, "constraints_json"),
+        ("--eval-memory-json", eval_memory_json, "eval_memory_json"),
+    ]:
+        error = append_json_arg(args, option, value, field_name)
+        if error:
+            return error
+    if eval_registers:
+        args.extend(["--eval-registers", eval_registers])
+    if eval_stdin_bytes > 0:
+        args.extend(["--eval-stdin-bytes", str(eval_stdin_bytes)])
+
+    return run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angr_reachability(
+    source_address: str,
+    target_address: str,
+    binary_path: str = "",
+    pcode_language: str = "",
+    base_address: str = "",
+    complete_cfg: bool = False,
+    include_path: bool = True,
+    summary_limit: int = 50,
+    timeout: int = 120,
+) -> str:
+    """
+    Use angr CFGFast to check static reachability from one address to another.
+    """
+    binary_path, pcode_language = resolve_angr_defaults(binary_path, pcode_language)
+    missing = require_binary_path(binary_path)
+    if missing:
+        return missing
+
+    args = [
+        "--binary", binary_path,
+        "--reachability-from", normalize_ghidra_address(source_address),
+        "--reachability-to", normalize_ghidra_address(target_address),
+        "--summary-limit", str(max(1, summary_limit)),
+    ]
+    append_common_angr_args(args, pcode_language, base_address)
+    if complete_cfg:
+        args.append("--complete-cfg")
+    if include_path:
+        args.append("--include-path")
+    return run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angr_cfg_summary(
+    binary_path: str = "",
+    function_address: str = "",
+    pcode_language: str = "",
+    base_address: str = "",
+    complete_cfg: bool = False,
+    summary_limit: int = 50,
+    timeout: int = 120,
+) -> str:
+    """
+    Summarize angr CFGFast output for the whole binary or a single function.
+    """
+    binary_path, pcode_language = resolve_angr_defaults(binary_path, pcode_language)
+    missing = require_binary_path(binary_path)
+    if missing:
+        return missing
+
+    args = [
+        "--binary", binary_path,
+        "--cfg-summary",
+        "--summary-limit", str(max(1, summary_limit)),
+    ]
+    append_common_angr_args(args, pcode_language, base_address)
+    if function_address:
+        args.extend(["--function-address", normalize_ghidra_address(function_address)])
+    if complete_cfg:
+        args.append("--complete-cfg")
+    return run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angr_callgraph_summary(
+    binary_path: str = "",
+    pcode_language: str = "",
+    base_address: str = "",
+    complete_cfg: bool = False,
+    summary_limit: int = 100,
+    timeout: int = 180,
+) -> str:
+    """
+    Summarize angr's recovered callgraph edges.
+    """
+    binary_path, pcode_language = resolve_angr_defaults(binary_path, pcode_language)
+    missing = require_binary_path(binary_path)
+    if missing:
+        return missing
+
+    args = [
+        "--binary", binary_path,
+        "--callgraph-summary",
+        "--summary-limit", str(max(1, summary_limit)),
+    ]
+    append_common_angr_args(args, pcode_language, base_address)
+    if complete_cfg:
+        args.append("--complete-cfg")
+    return run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angr_lift_block(
+    address: str,
+    binary_path: str = "",
+    pcode_language: str = "",
+    base_address: str = "",
+    lift_format: str = "both",
+    block_size: int = 0,
+    num_inst: int = 0,
+    timeout: int = 60,
+) -> str:
+    """
+    Lift a basic block to VEX, AIL, or both.
+    """
+    binary_path, pcode_language = resolve_angr_defaults(binary_path, pcode_language)
+    missing = require_binary_path(binary_path)
+    if missing:
+        return missing
+    if lift_format not in {"vex", "ail", "both"}:
+        return "lift_format must be one of: vex, ail, both"
+
+    args = [
+        "--binary", binary_path,
+        "--lift-block", normalize_ghidra_address(address),
+        "--lift-format", lift_format,
+    ]
+    append_common_angr_args(args, pcode_language, base_address)
+    if block_size > 0:
+        args.extend(["--block-size", str(block_size)])
+    if num_inst > 0:
+        args.extend(["--num-inst", str(num_inst)])
+    return run_angr_helper(args, max(1, timeout))
+
+@mcp.tool()
+def angr_compare_decompilers(
+    addresses: str,
+    binary_path: str = "",
+    pcode_language: str = "",
+    rust: bool = True,
+    run_rust_setup: bool = False,
+    timeout_per_function: int = 120,
+    max_functions: int = 10,
+) -> str:
+    """
+    Batch-compare Ghidra decompiler output with angr/Oxidizer output.
+
+    addresses accepts comma, space, or newline-separated function entry
+    addresses. Results are returned in side-by-side text sections.
+    """
+    binary_path, pcode_language = resolve_angr_defaults(binary_path, pcode_language)
+    missing = require_binary_path(binary_path)
+    if missing:
+        return missing
+
+    selected_addresses = split_addresses(addresses, max_functions)
+    if not selected_addresses:
+        return "No addresses provided"
+
+    sections = []
+    per_function_timeout = max(1, min(timeout_per_function, TIMEOUT_DECOMPILE_MAX))
+    for address in selected_addresses:
+        ghidra_output = "\n".join(safe_get(
+            "decompile_function",
+            {"address": address, "timeout": per_function_timeout},
+            timeout=float(per_function_timeout),
+        ))
+        angr_args = ["--binary", binary_path, "--address", address]
+        if rust:
+            angr_args.append("--rust")
+            if not run_rust_setup:
+                angr_args.append("--skip-rust-setup")
+        else:
+            angr_args.append("--no-rust")
+        if pcode_language:
+            angr_args.extend(["--pcode-language", pcode_language])
+        oxidizer_output = run_angr_helper(angr_args, per_function_timeout)
+        sections.append(
+            f"## {address}\n\n"
+            f"### Ghidra\n{ghidra_output}\n\n"
+            f"### angr/Oxidizer\n{oxidizer_output}"
+        )
+
+    return "\n\n".join(sections)
 
 @mcp.tool()
 def angryghidra_check_setup() -> str:

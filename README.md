@@ -49,9 +49,13 @@ tools.
 - For Solana/eBPF ELFs, pass `pcode_language="eBPF:LE:64:default"` or let the
   bridge infer it from Ghidra's program language id. The helper patches CLE at
   runtime for Solana's e_machine 263 and uses angr's p-code engine.
-- `angr_symbolic_find` exposes core angr path search without AngryGhidra. It can
-  find a path to a target address, avoid addresses, and solve symbolic
-  stdin/argv, memory, and register values.
+- Core angr tools do not require AngryGhidra:
+  `angr_symbolic_find` searches for a path to a target address;
+  `angr_solve_constraints_at` adds JSON-described constraints at the found
+  state and evaluates requested values; `angr_reachability` checks static CFG
+  reachability; `angr_cfg_summary` and `angr_callgraph_summary` summarize
+  recovered graph structure; `angr_lift_block` lifts a block to VEX/AIL; and
+  `angr_compare_decompilers` batches Ghidra-vs-Oxidizer decompiler output.
 - AngryGhidra support is optional. `angryghidra_*` tools look for
   `ANGRYGHIDRA_SCRIPT`, `ANGRYGHIDRA_HOME/angryghidra_script/angryghidra.py`,
   or a sibling `AngryGhidra/angryghidra_script/angryghidra.py`. If none is
