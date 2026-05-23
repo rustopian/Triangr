@@ -5,10 +5,11 @@ All notable changes in this fork. Format loosely follows
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
 This is a fork of [LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraMCP).
-The "Unreleased" section accumulates changes since the upstream `v1-4` release
-(commit `27f316f`).
+The "Unreleased" section accumulates changes since the latest tagged release.
 
 ## [Unreleased]
+
+## [1.6.1] - 2026-05-23
 
 ### Added
 - **Expanded core angr MCP capabilities**: added `angr_reachability`,
@@ -20,6 +21,12 @@ The "Unreleased" section accumulates changes since the upstream `v1-4` release
 - **Writeable angr annotations**: added `angr_annotate_symbolic_path` to run a
   symbolic path search, preview recovered trace comments by default, and write
   them only with explicit overwrite confirmation.
+- **Reviewed annotation previews**: `angr_annotate_symbolic_path` now shows the
+  current comment each planned annotation would overwrite alongside the pending
+  comment, returns a short-lived preview token, and refuses writes unless the
+  exact reviewed plan is applied with that token.
+- **Current comment reads**: added the read-only `/get_comment` Ghidra HTTP
+  endpoint and `get_comment` MCP tool for disassembly and decompiler comments.
 - **angr safety caps**: bounded helper output, symbolic input sizes, execution
   steps, summary output, lift size, and decompiler comparison batches.
 - **Richer symbolic solving**: `angr_solve_constraints_at` reaches a target
