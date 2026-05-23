@@ -5,7 +5,7 @@ GHIDRA_VERSION="12.0.4"
 GHIDRA_DATE="20260303"
 GHIDRA_URL=""
 GHIDRA_REPO="NationalSecurityAgency/ghidra"
-FORK_REPO_URL="https://github.com/rustopian/GhidraMCP.git"
+FORK_REPO_URL="https://github.com/rustopian/Triangr.git"
 FORK_REPO_REF="main"
 ANGRYGHIDRA_REPO="https://github.com/Nalen98/AngryGhidra.git"
 
@@ -335,7 +335,7 @@ download_triangr_extension() {
   local output="$downloads_dir/triangr-extension.zip"
   local asset_url
   mkdir -p "$downloads_dir"
-  asset_url="$(github_latest_asset_url "rustopian/GhidraMCP" 'GhidraMCP.*\.zip$')"
+  asset_url="$(github_latest_asset_url "rustopian/Triangr" 'GhidraMCP.*\.zip$')"
   download "$asset_url" "$output"
   echo "$output"
 }

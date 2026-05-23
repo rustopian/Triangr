@@ -2,50 +2,88 @@
 
 **angr/Oxidizer decompilation + Ghidra project context + AI analysis**
 
-Triangr turns a live Ghidra project into an agent-ready reverse engineering
-workbench. It is the maintained, hardened fork of
-[LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraMCP), expanded
-from "LLM can ask Ghidra for decompiler text" into a three-way analysis loop:
-Ghidra keeps the project context, angr answers program-analysis questions, and
-MCP lets AI tools drive the workflow.
+Triangr turns a binary into an agent-ready reverse engineering workbench.
 
-Use it to inspect a binary, compare Ghidra and Oxidizer decompilation, trace how
+Use it to analyze executables and smart contracts in depth, providing
+tools that keep AI agents from wasting tokens and presenting unsubtantiated
+guesses.
+
+This is the maintained, hardened, feature-extended fork of
+[LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraMCP).
+`Ghidra` keeps the project context, `angr` answers program-analysis questions,
+and MCP lets AI tools drive the workflow.
+
+Your agents can inspect binary, compare Ghidra & Oxidizer decompilation, trace how
 to reach a branch, solve constraints at an address, lift blocks to VEX or AIL,
 summarize CFGs and callgraphs, rename functions and variables, edit structures,
-annotate paths, and patch bytes from the same MCP bridge. Optional parts stay
-optional: Ghidra-only workflows do not require angr, core angr workflows do not
-require AngryGhidra, and missing optional components return clear setup errors
-instead of breaking the bridge.
+annotate paths, and patch bytes from the same MCP bridge.
+
+Since structures, function and variable names, and annotations are made directly
+into Ghidra projects, knowledge about the binary grows from one run to the next.
 
 This fork preserves credit for the original work, design, and naming by
 LaurieWired. New endpoints, hardening, and incorporated pull requests are listed
 in [CHANGELOG.md](CHANGELOG.md).
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/rustopian/GhidraMCP)](https://github.com/rustopian/GhidraMCP/releases)
-[![GitHub stars](https://img.shields.io/github/stars/rustopian/GhidraMCP)](https://github.com/rustopian/GhidraMCP/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/rustopian/GhidraMCP)](https://github.com/rustopian/GhidraMCP/network/members)
-[![GitHub contributors](https://img.shields.io/github/contributors/rustopian/GhidraMCP)](https://github.com/rustopian/GhidraMCP/graphs/contributors)
-[![Follow @lauriewired](https://img.shields.io/twitter/follow/lauriewired?style=social)](https://twitter.com/lauriewired)
+[![CI](https://github.com/rustopian/Triangr/actions/workflows/build.yml/badge.svg)](https://github.com/rustopian/Triangr/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/rustopian/Triangr?label=release)](https://github.com/rustopian/Triangr/releases)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/rustopian/Triangr/blob/main/pyproject.toml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-![ghidra_MCP_logo](https://github.com/user-attachments/assets/4986d702-be3f-4697-acce-aea55cd79ad3)
+## Quick Start
 
-https://github.com/user-attachments/assets/36080514-f227-44bd-af84-78e29ee1d7f9
+Install Triangr and its local toolchain:
+
+```bash
+git clone https://github.com/rustopian/Triangr.git triangr
+cd triangr
+./scripts/install.sh --install-deps --yes
+```
+
+Start Ghidra and enable the plugin:
+
+```bash
+source ~/.local/share/triangr/env.sh
+"$GHIDRA_HOME/ghidraRun"
+```
+
+Create or open a Ghidra project, import a binary, and open it for analysis.
+When the main analysis window appears, enable `Triangr` under `File` ->
+`Configure` -> `Developer`. The plugin starts a localhost HTTP server at
+`http://127.0.0.1:8080/`; verify it with:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+Add the MCP server to your AI tool's MCP JSON config, using the wrapper written
+by the installer:
+
+```json
+{
+  "mcpServers": {
+    "triangr": {
+      "command": "/ABSOLUTE/PATH/TO/.local/share/triangr/bin/triangr-mcp",
+      "args": [
+        "--ghidra-server",
+        "http://127.0.0.1:8080/"
+      ]
+    }
+  }
+}
+```
+
+Sample supported tasks:
+
+- "Summarize the loaded binary and list all entrypoints, public and hidden."
+- "Decompile auth check functions in Ghidra and Oxidizer and make a Rust prototype."
+- "Find paths that can reach this address and explain the constraints."
+- "Make the code more readable analyzing and naming the 10 most common structures."
 
 ## MCP
 
-Triangr is a Model Context Protocol server and Ghidra plugin. It works with MCP
-clients that can launch a stdio server or connect to an SSE server, including
-Claude Code, Codex, Claude Desktop, Cline, 5ire, and other MCP-capable AI tools.
-
-The Python bridge entrypoint remains `bridge_mcp_ghidra` for compatibility. The
-installer also creates `~/.local/share/triangr/bin/triangr-mcp`, a wrapper that
-loads the Triangr environment before starting the bridge, so GUI MCP clients do
-not need hand-written `ANGRYGHIDRA_PYTHON` paths. The bridge speaks MCP on one
-side and Ghidra's local HTTP plugin on the other, defaulting to
-`http://127.0.0.1:8080/`. The Ghidra plugin binds to localhost by default, has a
-configurable host and port, exposes a `/health` endpoint, and supports both
-interactive and long-running decompilation workflows.
+Triangr works with Claude Code, Codex, Claude Desktop, Cline, 5ire, and other
+MCP-capable AI tools.
 
 ## Ghidra Capabilities
 
@@ -76,16 +114,10 @@ angr gives the bridge executable reasoning beyond static project inspection:
 - Check static reachability between addresses.
 - Recover and summarize CFG and callgraph structure.
 - Lift blocks to VEX or AIL for lower-level IR inspection.
-- Use p-code support for targets such as Solana/eBPF, including Ghidra language
+- Use p-code support for targets such as eBPF, including Ghidra language
   inference when available.
 - Use AngryGhidra when installed for compatible symbolic execution workflows,
   while falling back to the core angr helper when appropriate.
-
-The bridge looks for angr through `GHIDRA_MCP_ANGR_PYTHON`, the default
-installer venv at `~/.local/share/triangr/venv`, local virtual environments,
-then the Python running the MCP bridge. AngryGhidra support is detected through
-`ANGRYGHIDRA_SCRIPT`, `ANGRYGHIDRA_HOME`, the default installer checkout under
-`~/.local/share/triangr/AngryGhidra`, or a sibling `AngryGhidra` checkout.
 
 ## Install Script
 
@@ -100,13 +132,12 @@ when a supported package manager is available:
 
 If you skip package-manager installation, install these yourself first:
 Python 3.10+, `git`, `curl` or `wget`, `unzip`, JDK 21, and Maven. For Ghidra
-extension builds, the installer uses the Gradle version required by the
-downloaded Ghidra release rather than relying on an arbitrary system Gradle.
+extension builds, the installer uses the required Gradle version, not system.
 
-### Using It
+### Using the Script
 
 ```bash
-git clone https://github.com/rustopian/GhidraMCP.git triangr
+git clone https://github.com/rustopian/Triangr.git triangr
 cd triangr
 ./scripts/install.sh
 ```
@@ -124,7 +155,6 @@ Useful options:
 ./scripts/install.sh --prefix ~/.local/share/triangr
 ./scripts/install.sh --no-angryghidra
 ./scripts/install.sh --no-extension
-./scripts/install.sh --require-angryghidra-build
 ```
 
 ### What It Does
@@ -167,7 +197,7 @@ python -c "import angr; print(angr.__version__)"
 In Ghidra:
 
 1. Restart Ghidra if it was already open.
-2. Open a program in CodeBrowser.
+2. Create or open a project, import a binary, and open it for analysis.
 3. Enable the Triangr plugin under `File` -> `Configure` -> `Developer`.
 4. Optional: enable AngryGhidra under `File` -> `Configure` -> `Miscellaneous`.
 5. Check the bridge:
@@ -178,7 +208,7 @@ curl http://127.0.0.1:8080/health
 
 ## Manual Installation
 
-Download the latest [release](https://github.com/rustopian/GhidraMCP/releases)
+Download the latest [release](https://github.com/rustopian/Triangr/releases)
 from this repository. It contains the Ghidra plugin and Python MCP client.
 
 1. Run Ghidra.
@@ -187,7 +217,7 @@ from this repository. It contains the Ghidra plugin and Python MCP client.
 4. Select the `GhidraMCP-<version>.zip` extension archive. The archive name is
    retained for compatibility during the Triangr rebrand.
 5. Restart Ghidra.
-6. Open a program in CodeBrowser.
+6. Create or open a project, import a binary, and open it for analysis.
 7. Make sure the Triangr plugin is enabled in `File` -> `Configure` ->
    `Developer`.
 8. Optional: configure host and port under `Edit` -> `Tool Options` ->
@@ -196,8 +226,8 @@ from this repository. It contains the Ghidra plugin and Python MCP client.
 The Python MCP client can be installed from this repository:
 
 ```bash
-pipx install git+https://github.com/rustopian/GhidraMCP.git
-uv tool install git+https://github.com/rustopian/GhidraMCP.git
+pipx install git+https://github.com/rustopian/Triangr.git
+uv tool install git+https://github.com/rustopian/Triangr.git
 ```
 
 Or directly from a checkout:
