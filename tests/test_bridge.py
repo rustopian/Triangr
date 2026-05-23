@@ -29,6 +29,19 @@ def _preview_token(output: str) -> str:
     raise AssertionError("preview_token not found")
 
 
+def _mock_comment(httpx_mock, address: str, kind: str = "disasm", comment: str = "", count: int = 1):
+    for _ in range(count):
+        httpx_mock.add_response(
+            url=_url(f"get_comment?address={address}&kind={kind}"),
+            json={
+                "address": address,
+                "kind": kind,
+                "exists": bool(comment),
+                "comment": comment,
+            },
+        )
+
+
 # ---------------------------------------------------------------------------
 # Listing endpoints (GET ?offset=&limit=)
 # ---------------------------------------------------------------------------
@@ -371,17 +384,23 @@ class TestAngrIntegrations:
         assert "AngryGhidra is not installed or configured" in out
 
     def test_angr_annotate_symbolic_path_previews_by_default(
-            self, bridge_module, monkeypatch):
+            self, bridge_module, httpx_mock, monkeypatch):
         monkeypatch.setattr(
             bridge_module,
             "angr_symbolic_find",
             lambda **_kwargs: "engine: AngryGhidra\nt:0x401000\nt:0x401020")
+        _mock_comment(httpx_mock, "0x401000", comment="existing branch note")
+        _mock_comment(httpx_mock, "0x401020")
 
         out = bridge_module.angr_annotate_symbolic_path(find_address="0x401020")
 
         assert "Preview only: 2 trace comment(s) would be written" in out
         assert "preview_token: " in out
-        assert "0x401000: angr symbolic path: step 1/2 toward 0x401020" in out
+        assert "- disasm 0x401000" in out
+        assert "current: existing branch note" in out
+        assert "pending: angr symbolic path: step 1/2 toward 0x401020" in out
+        assert "- disasm 0x401020" in out
+        assert "current: <none>" in out
 
     def test_angr_annotate_symbolic_path_requires_overwrite_confirmation(
             self, bridge_module, monkeypatch):
@@ -413,11 +432,12 @@ class TestAngrIntegrations:
         assert "First call angr_annotate_symbolic_path" in out
 
     def test_angr_annotate_symbolic_path_rejects_changed_call_after_preview(
-            self, bridge_module, monkeypatch):
+            self, bridge_module, httpx_mock, monkeypatch):
         monkeypatch.setattr(
             bridge_module,
             "angr_symbolic_find",
             lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+        _mock_comment(httpx_mock, "0x401000", count=2)
         preview = bridge_module.angr_annotate_symbolic_path(
             find_address="0x401020",
             comment_prefix="previewed path")
@@ -432,12 +452,49 @@ class TestAngrIntegrations:
 
         assert "preview_token does not match this exact annotation request" in out
 
+    def test_angr_annotate_symbolic_path_rejects_changed_current_comment(
+            self, bridge_module, httpx_mock, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+        _mock_comment(httpx_mock, "0x401000", comment="old")
+        _mock_comment(httpx_mock, "0x401000", comment="changed")
+        preview = bridge_module.angr_annotate_symbolic_path(find_address="0x401020")
+        token = _preview_token(preview)
+
+        out = bridge_module.angr_annotate_symbolic_path(
+            find_address="0x401020",
+            apply=True,
+            overwrite_existing=True,
+            preview_token=token)
+
+        assert "preview_token does not match this exact annotation request" in out
+
+    def test_angr_annotate_symbolic_path_requires_comment_read_before_token(
+            self, bridge_module, httpx_mock, monkeypatch):
+        monkeypatch.setattr(
+            bridge_module,
+            "angr_symbolic_find",
+            lambda **_kwargs: "engine: AngryGhidra\nt:0x401000")
+        httpx_mock.add_response(
+            url=_url("get_comment?address=0x401000&kind=disasm"),
+            status_code=404,
+            text="missing")
+
+        out = bridge_module.angr_annotate_symbolic_path(find_address="0x401020")
+
+        assert "could not be read" in out
+        assert "preview_token:" not in out
+
     def test_angr_annotate_symbolic_path_writes_trace_comments_with_confirmation(
             self, bridge_module, httpx_mock, monkeypatch):
         monkeypatch.setattr(
             bridge_module,
             "angr_symbolic_find",
             lambda **_kwargs: "engine: AngryGhidra\nt:0x401000\nt:0x401020")
+        _mock_comment(httpx_mock, "0x401000", comment="existing branch note", count=2)
+        _mock_comment(httpx_mock, "0x401020", count=2)
         httpx_mock.add_response(
             method="POST",
             url=_url("set_disassembly_comment"),
@@ -784,6 +841,24 @@ class TestMutations:
             match_content=b"address=0x120&comment=hello",
             text="Comment set successfully")
         bridge_module.set_decomp_comment("0x120", "hello")
+
+    def test_get_comment(self, bridge_module, httpx_mock):
+        httpx_mock.add_response(
+            url=_url("get_comment?address=0x120&kind=decomp"),
+            json={
+                "address": "0x120",
+                "kind": "decomp",
+                "exists": True,
+                "comment": "existing note",
+            },
+        )
+
+        assert bridge_module.get_comment("0x120", "decomp") == {
+            "address": "0x120",
+            "kind": "decomp",
+            "exists": True,
+            "comment": "existing note",
+        }
 
     def test_set_disasm_comment(self, bridge_module, httpx_mock):
         httpx_mock.add_response(

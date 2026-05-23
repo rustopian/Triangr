@@ -112,6 +112,36 @@ def safe_get(endpoint: str, params: dict = None, timeout: float = 30.0) -> list:
     retry=retry_if_exception_type((httpx.ConnectError, httpx.ConnectTimeout)),
     reraise=True,
 )
+def safe_get_json(endpoint: str, params: dict = None, timeout: float = 30.0) -> dict:
+    """
+    Perform a GET request and parse a JSON object response.
+    """
+    if params is None:
+        params = {}
+
+    url = urljoin(ghidra_server_url, endpoint)
+
+    try:
+        response = get_http_client().get(url, params=params, timeout=timeout)
+        response.encoding = 'utf-8'
+        if response.status_code != 200:
+            return {"error": f"Error {response.status_code}: {response.text.strip()}"}
+        try:
+            parsed = response.json()
+        except ValueError as e:
+            return {"error": f"Invalid JSON response from {endpoint}: {e}"}
+        if not isinstance(parsed, dict):
+            return {"error": f"Invalid JSON response from {endpoint}: expected object"}
+        return parsed
+    except Exception as e:
+        return {"error": f"Request failed: {str(e)}"}
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type((httpx.ConnectError, httpx.ConnectTimeout)),
+    reraise=True,
+)
 def safe_post(endpoint: str, data: dict | str) -> str:
     try:
         url = urljoin(ghidra_server_url, endpoint)
@@ -739,6 +769,48 @@ def missing_annotation_preview_message() -> str:
         "with apply=True, overwrite_existing=True, and the preview_token from that response."
     )
 
+def comment_kind_for_write_endpoint(endpoint: str) -> str:
+    if endpoint == "set_disassembly_comment":
+        return "disasm"
+    if endpoint == "set_decompiler_comment":
+        return "decomp"
+    return ""
+
+def read_current_comment(address: str, endpoint: str) -> tuple[str, str]:
+    kind = comment_kind_for_write_endpoint(endpoint)
+    if not kind:
+        return "", f"Cannot read current comment for unsupported endpoint {endpoint!r}"
+    response = safe_get_json("get_comment", {"address": address, "kind": kind}, timeout=10.0)
+    error = response.get("error")
+    if error:
+        return "", str(error)
+    return str(response.get("comment", "")), ""
+
+def attach_current_comments(planned_writes: list[dict]) -> str:
+    for planned_write in planned_writes:
+        current_comment, error = read_current_comment(
+            planned_write["address"],
+            planned_write["endpoint"],
+        )
+        if error:
+            return error
+        planned_write["current_comment"] = current_comment
+    return ""
+
+def format_preview_comment(value: str) -> str:
+    if not value:
+        return "<none>"
+    return value.replace("\n", "\n    ")
+
+def format_planned_comment_preview(planned_writes: list[dict]) -> str:
+    lines = ["Planned comment writes:"]
+    for planned_write in planned_writes:
+        kind = comment_kind_for_write_endpoint(planned_write["endpoint"]) or planned_write["endpoint"]
+        lines.append(f"- {kind} {planned_write['address']}")
+        lines.append(f"  current: {format_preview_comment(planned_write.get('current_comment', ''))}")
+        lines.append(f"  pending: {format_preview_comment(planned_write['comment'])}")
+    return "\n".join(lines)
+
 @mcp.tool()
 def list_methods(offset: int = 0, limit: int = 100) -> list:
     """
@@ -1151,10 +1223,6 @@ def angr_annotate_symbolic_path(
 
     total = len(trace_addresses)
     normalized_target = normalize_ghidra_address(find_address)
-    preview = [
-        f"{address}: {comment_prefix}: step {index}/{total} toward {normalized_target}"
-        for index, address in enumerate(trace_addresses, start=1)
-    ]
     endpoints = []
     if comment_kind in {"disasm", "both"}:
         endpoints.append("set_disassembly_comment")
@@ -1169,6 +1237,14 @@ def angr_annotate_symbolic_path(
         for index, address in enumerate(trace_addresses, start=1)
         for endpoint in endpoints
     ]
+    current_comment_error = attach_current_comments(planned_writes)
+    if current_comment_error:
+        return (
+            f"{result}\n\n"
+            "Refusing to create an annotation preview token because the current "
+            "comments that would be overwritten could not be read. Update and "
+            f"restart the GhidraMCP extension, then retry. Details: {current_comment_error}"
+        )
     preview_payload = {
         "tool": "angr_annotate_symbolic_path",
         "request": {
@@ -1209,7 +1285,7 @@ def angr_annotate_symbolic_path(
             f"overwrite_existing=True, and preview_token=\"{token}\" to write them. "
             f"Preview tokens expire after {ANGR_PREVIEW_CONFIRMATION_TTL_SECONDS // 60} minutes.\n"
             f"preview_token: {token}\n"
-            + "\n".join(preview)
+            + format_planned_comment_preview(planned_writes)
         )
     if not overwrite_existing:
         return (
@@ -1681,6 +1757,18 @@ def disassemble_function(address: str) -> list:
     Get assembly code (address: instruction; comment) for a function.
     """
     return safe_get("disassemble_function", {"address": address})
+
+@mcp.tool()
+def get_comment(address: str, kind: str = "disasm") -> dict:
+    """
+    Read the current comment that set_disasm_comment or set_decomp_comment would replace.
+
+    kind must be "disasm" for the disassembly EOL comment or "decomp" for the
+    decompiler/pre comment.
+    """
+    if kind not in {"disasm", "decomp"}:
+        return {"error": 'kind must be "disasm" or "decomp"'}
+    return safe_get_json("get_comment", {"address": address, "kind": kind})
 
 @mcp.tool()
 def set_decomp_comment(address: str, comment: str) -> str:
