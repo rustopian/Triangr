@@ -9,6 +9,83 @@ The "Unreleased" section accumulates changes since the latest tagged release.
 
 ## [Unreleased]
 
+### Synced with upstream GhidraMCP 2.0
+Merged [LaurieWired/GhidraMCP@1e98025](https://github.com/LaurieWired/GhidraMCP/commit/1e98025),
+upstream's 2.0 rewrite, and rebuilt every Triangr feature on its new architecture.
+Triangr code lives in separate files (`TriangrService`, `TriangrModel`,
+`TriangrRoutes`, `AsyncDecompileTasks`, `triangr_tools.py`, `angr_tools.py`)
+with small hooks in upstream files, so later syncs conflict less.
+
+From upstream:
+- **Headless mode**: `ghidra-mcp --headless --binary PATH` imports and analyzes a
+  binary with PyGhidra and serves it with no Ghidra GUI (`headless` extra).
+  The installer now installs PyGhidra and exports `GHIDRA_INSTALL_DIR`.
+- **JSON backend**: tools return structured JSON, list tools are paginated with
+  `has_more`, and errors are MCP tool errors with stable codes.
+- **New tools**: `get_function_calls` (callers/callees, including indirect
+  calls), `read_memory` (marks unmapped and uninitialized gaps), `list_functions`
+  and `list_strings` filters, richer `get_program_info`.
+- **Backend hardening**: requests with an `Origin` header (browsers) or a foreign
+  `Host` header (DNS rebinding) are rejected.
+- `set_func_prototype` applies the function name given in the prototype.
+- New layout: the extension builds with Gradle from `extension/`, and the Python
+  server is the `ghidra_mcp` package in `src/`. Upstream's tests (unit and
+  headless integration) are included.
+
+Kept from Triangr, ported to the new backend:
+- Short tool names from #116 (`get_func_by_addr`, `decompile_by_addr`,
+  `rename_func_by_addr`, `set_func_prototype`, `set_lvar_type`,
+  `set_decomp_comment`, `set_disasm_comment`, `search_functions`).
+- Structure CRUD, `create_function`, `read_bytes`/`write_bytes`, `get_comment`,
+  async decompilation, the `decompile_by_addr` timeout, `check_server_health`,
+  and all angr/AngryGhidra tools, including preview-token guarded annotations.
+- Configurable bind host, decompiler read-only respect, first-attempt local
+  variable renames, the 512-character type expression cap, and type lookup in
+  the tool's open data type archives when the program lacks a type.
+- New end-to-end tests run the Triangr tools against a real headless Ghidra.
+
+### Changed
+- **Breaking**: Ghidra tools return JSON objects instead of text, and the
+  extension and MCP server must be updated together; an older plugin is
+  reported as `BAD_RESPONSE`.
+- The MCP server is now the `ghidra-mcp` command; `bridge_mcp_ghidra` remains as
+  an alias, and `bridge_mcp_ghidra.py` at the repo root is a launcher shim.
+  `angr_decompile.py` moved to `src/ghidra_mcp/helpers/`.
+- Ghidra 11.3.2 is no longer supported because upstream uses newer Ghidra APIs.
+  CI builds and tests against Ghidra 12.0.4 and 12.1.4. Extension zips are now
+  named `ghidra_<version>_PUBLIC_<date>_GhidraMCP.zip`.
+- The HTTP client uses upstream's `requests` session instead of httpx/tenacity.
+  Failed connection attempts are retried twice with backoff; requests that were
+  sent are never resent.
+- `extension.properties` names the extension `GhidraMCP`, matching its install
+  folder. With the name `Triangr`, Ghidra's zip installer recorded a folder that
+  did not exist. The plugin, its options, and its descriptions still say
+  Triangr.
+- `watchdog_healthy` in `/health` reports whether the backend's worker pools are
+  running. The old idle timer reported unhealthy after two quiet minutes.
+  `last_request_ms_ago` now counts tool requests rather than health probes.
+- The `angr` extra requires Python 3.12+, as angr 9.2.217 does.
+
+### Fixed
+- angr and AngryGhidra subprocesses no longer inherit the MCP stdio stream as
+  their stdin.
+- `write_bytes` keeps defined data in place and clears and re-disassembles only
+  ranges that held instructions, starting at the first affected instruction.
+  Before, patching data turned it into instructions.
+- `rename_structure_field` rejects a name already used by another field; Ghidra
+  12 accepts duplicates without an error.
+- Structure lookups prefer exact names, accept full paths, and report ambiguous
+  names with their paths; empty structures report size 0 instead of 1.
+- Async decompilation evicts finished tasks before running ones when full.
+- Installer: builds the extension with Gradle on JDK 21, picks the zip for the
+  configured Ghidra version, and fails with a clear message when no extension
+  can be built or downloaded.
+
+### Removed
+- The Maven build (`pom.xml`, assembly descriptor, copied Ghidra jars in `lib/`),
+  the unused `tests/build.gradle`, and `tests/test_health.py`, which did not
+  exercise project code. The pytest-httpx test dependency is no longer needed.
+
 ## [1.6.1] - 2026-05-23
 
 ### Added

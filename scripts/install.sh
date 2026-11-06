@@ -29,7 +29,8 @@ usage() {
 Usage: $0 [options]
 
 Install Triangr prerequisites, Ghidra, the Triangr Ghidra extension,
-Python bridge dependencies, angr/Oxidizer, and optional AngryGhidra.
+Python bridge dependencies (including PyGhidra for headless mode),
+angr/Oxidizer, and optional AngryGhidra.
 
 Options:
   --prefix PATH            Install root. Default: ${PREFIX}
@@ -137,16 +138,16 @@ install_os_deps() {
       echo "Homebrew is not installed. Install Homebrew first or re-run with --no-install-deps." >&2
       return 1
     fi
-    brew install python git curl unzip openjdk@21 maven
+    brew install python git curl unzip openjdk@21
   elif need_cmd apt-get; then
     run_sudo apt-get update
-    run_sudo apt-get install -y python3 python3-venv python3-pip git curl unzip openjdk-21-jdk maven build-essential
+    run_sudo apt-get install -y python3 python3-venv python3-pip git curl unzip openjdk-21-jdk build-essential
   elif need_cmd dnf; then
-    run_sudo dnf install -y python3 python3-pip git curl unzip java-21-openjdk-devel maven gcc gcc-c++ make
+    run_sudo dnf install -y python3 python3-pip git curl unzip java-21-openjdk-devel gcc gcc-c++ make
   elif need_cmd pacman; then
-    run_sudo pacman -Sy --needed python python-pip git curl unzip jdk21-openjdk maven base-devel
+    run_sudo pacman -Sy --needed python python-pip git curl unzip jdk21-openjdk base-devel
   else
-    echo "No supported package manager found. Install Python 3.10+, git, curl, unzip, JDK 21, and Maven manually." >&2
+    echo "No supported package manager found. Install Python 3.10+, git, curl, unzip, and JDK 21 manually." >&2
   fi
 }
 
@@ -256,6 +257,37 @@ gradle_command_supports() {
   version_at_least "$current" "$minimum"
 }
 
+# Gradle must run on the JDK Ghidra targets; a newer default JDK (e.g. Homebrew's latest
+# openjdk) breaks the Ghidra build scripts. Prints a JDK 21 home if one can be found.
+java21_home() {
+  local home=""
+  if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]] &&
+    "$JAVA_HOME/bin/java" -version 2>&1 | grep -q 'version "21'; then
+    echo "$JAVA_HOME"
+    return 0
+  fi
+  if [[ -x /usr/libexec/java_home ]]; then
+    home="$(/usr/libexec/java_home -v 21 2>/dev/null || true)"
+  fi
+  if [[ -z "$home" ]] && need_cmd brew; then
+    home="$(brew --prefix openjdk@21 2>/dev/null || true)"
+    [[ -n "$home" && -x "$home/bin/java" ]] || home=""
+  fi
+  [[ -n "$home" ]] && echo "$home"
+}
+
+run_gradle() {
+  local gradle_cmd="$1"
+  shift
+  local jdk
+  jdk="$(java21_home || true)"
+  if [[ -n "$jdk" ]]; then
+    JAVA_HOME="$jdk" "$gradle_cmd" "$@"
+  else
+    "$gradle_cmd" "$@"
+  fi
+}
+
 ensure_gradle_for_ghidra() {
   local ghidra_home="$1"
   local version
@@ -298,36 +330,22 @@ install_python_env() {
   "$venv/bin/python" -m pip install -e "$REPO_DIR"
 }
 
-copy_ghidra_libs_for_build() {
-  local ghidra_home="$PREFIX/tools/ghidra_${GHIDRA_VERSION}_PUBLIC"
-  local libs=(
-    "Features/Base/lib/Base.jar"
-    "Features/Decompiler/lib/Decompiler.jar"
-    "Framework/Docking/lib/Docking.jar"
-    "Framework/Generic/lib/Generic.jar"
-    "Framework/Project/lib/Project.jar"
-    "Framework/SoftwareModeling/lib/SoftwareModeling.jar"
-    "Framework/Utility/lib/Utility.jar"
-    "Framework/Gui/lib/Gui.jar"
-  )
-
-  mkdir -p "$REPO_DIR/lib"
-  for lib in "${libs[@]}"; do
-    cp "$ghidra_home/Ghidra/$lib" "$REPO_DIR/lib/"
-  done
-}
-
 find_extension_zip() {
   local search_root="$1"
-  find "$search_root" -type f -name 'GhidraMCP-*.zip' | sort | tail -n 1
+  [[ -d "$search_root" ]] || return 0
+  # Gradle names the zip ghidra_<version>_PUBLIC_<date>_GhidraMCP.zip; an extension only
+  # installs into the Ghidra version it was built for.
+  find "$search_root" -type f -name "ghidra_${GHIDRA_VERSION}_*GhidraMCP.zip" | sort | tail -n 1
 }
 
 build_triangr_extension() {
-  if ! need_cmd mvn; then
+  local ghidra_home="$PREFIX/tools/ghidra_${GHIDRA_VERSION}_PUBLIC"
+  local gradle_cmd=""
+  if ! gradle_cmd="$(ensure_gradle_for_ghidra "$ghidra_home")"; then
+    echo "Could not install a Ghidra-compatible Gradle." >&2
     return 1
   fi
-  copy_ghidra_libs_for_build
-  mvn -q -f "$REPO_DIR/pom.xml" clean package assembly:single
+  (cd "$REPO_DIR/extension" && GHIDRA_INSTALL_DIR="$ghidra_home" run_gradle "$gradle_cmd" --quiet buildExtension)
 }
 
 download_triangr_extension() {
@@ -335,8 +353,12 @@ download_triangr_extension() {
   local output="$downloads_dir/triangr-extension.zip"
   local asset_url
   mkdir -p "$downloads_dir"
-  asset_url="$(github_latest_asset_url "rustopian/Triangr" 'GhidraMCP.*\.zip$')"
-  download "$asset_url" "$output"
+  if ! asset_url="$(github_latest_asset_url "rustopian/Triangr" "ghidra_${GHIDRA_VERSION//./\\.}_.*GhidraMCP\\.zip$")"; then
+    echo "No release asset for Ghidra ${GHIDRA_VERSION}; trying any GhidraMCP extension asset." >&2
+    asset_url="$(github_latest_asset_url "rustopian/Triangr" 'GhidraMCP.*\.zip$')" || return 1
+  fi
+  [[ -n "$asset_url" ]] || return 1
+  download "$asset_url" "$output" >&2 || return 1
   echo "$output"
 }
 
@@ -402,16 +424,18 @@ install_triangr_extension() {
 
   echo "Building Triangr extension from this checkout"
   if build_triangr_extension; then
-    zip_path="$(find_extension_zip "$REPO_DIR/target")"
-  fi
-
-  if [[ -z "$zip_path" ]]; then
-    zip_path="$(find_extension_zip "$REPO_DIR/target" || true)"
+    zip_path="$(find_extension_zip "$REPO_DIR/extension/dist")"
+  else
+    echo "Extension build failed." >&2
   fi
 
   if [[ -z "$zip_path" ]]; then
     echo "No local extension ZIP found. Downloading the latest release asset."
-    zip_path="$(download_triangr_extension)"
+    if ! zip_path="$(download_triangr_extension)"; then
+      echo "Could not build or download the Triangr extension for Ghidra ${GHIDRA_VERSION}." >&2
+      echo "Install JDK 21 and re-run, or build it with: cd extension && gradle buildExtension" >&2
+      return 1
+    fi
   fi
 
   install_extension_zip "$zip_path" "GhidraMCP"
@@ -441,7 +465,7 @@ install_angryghidra() {
   fi
 
   echo "Building AngryGhidra extension"
-  if (cd "$dest" && GHIDRA_INSTALL_DIR="$ghidra_home" "$gradle_cmd" --quiet); then
+  if (cd "$dest" && GHIDRA_INSTALL_DIR="$ghidra_home" run_gradle "$gradle_cmd" --quiet); then
     zip_path="$(find "$dest" -type f -name '*AngryGhidra*.zip' | sort | tail -n 1)"
     if [[ -n "$zip_path" ]]; then
       install_extension_zip "$zip_path" "AngryGhidra"
@@ -536,8 +560,11 @@ In Ghidra:
   3. Enable the Triangr plugin under File -> Configure -> Developer.
   4. Enable AngryGhidra under File -> Configure -> Miscellaneous if you want its UI.
 
-MCP bridge:
+MCP bridge (connects to the Ghidra GUI plugin):
   $PREFIX/bin/triangr-mcp
+
+Headless mode (no Ghidra GUI; imports and analyzes the binary itself):
+  $PREFIX/bin/triangr-mcp --headless --binary /path/to/binary --project ~/triangr-projects
 
 Useful environment:
   $PREFIX/env.sh
