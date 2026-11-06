@@ -67,6 +67,9 @@ Kept from Triangr, ported to the new backend:
 - The `angr` extra requires Python 3.12+, as angr 9.2.217 does.
 
 ### Fixed
+- `import angr` failed in fresh installs: angr 9.2.217's pyvex uses
+  `bitstring.ConstBitStream`, which bitstring 5.0 removed. bitstring is now
+  pinned below 5 with angr.
 - angr and AngryGhidra subprocesses no longer inherit the MCP stdio stream as
   their stdin.
 - `write_bytes` keeps defined data in place and clears and re-disassembles only

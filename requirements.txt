@@ -4,4 +4,6 @@
 mcp>=1.30,<2
 requests>=2.32,<3
 angr==9.2.217
+# angr 9.2.217's pyvex uses bitstring.ConstBitStream, which bitstring 5 removed.
+bitstring>=4,<5
 pyghidra>=3.1

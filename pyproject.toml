@@ -34,7 +34,11 @@ classifiers = [
 [project.optional-dependencies]
 headless = ["pyghidra>=3.1"]
 # angr 9.2.217 needs Python 3.12+; on older Pythons the angr tools report it as missing.
-angr = ["angr==9.2.217; python_version >= '3.12'"]
+# Its pyvex uses bitstring.ConstBitStream, which bitstring 5 removed.
+angr = [
+    "angr==9.2.217; python_version >= '3.12'",
+    "bitstring>=4,<5; python_version >= '3.12'",
+]
 
 [project.scripts]
 ghidra-mcp = "ghidra_mcp.cli:main"
