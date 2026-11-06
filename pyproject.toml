@@ -1,19 +1,24 @@
 [build-system]
-requires = ["hatchling>=1.20", "hatch-vcs>=0.5.0"]
+requires = ["hatchling>=1.25", "hatch-vcs>=0.5.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ghidramcp"
 dynamic = ["version"]
-description = "Triangr MCP bridge for Ghidra project context and optional angr/Oxidizer analysis"
+description = "Triangr: MCP server for Ghidra project context (GUI or headless) and optional angr/Oxidizer analysis"
 readme = "README.md"
-requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
-    {name = "LaurieWired"},
-    {name = "Triangr contributors"},
+    { name = "LaurieWired" },
+    { name = "Triangr contributors" },
 ]
-keywords = ["ghidra", "reverse-engineering", "mcp", "model-context-protocol"]
+requires-python = ">=3.10"
+keywords = ["ghidra", "angr", "reverse-engineering", "mcp", "model-context-protocol"]
+dependencies = [
+    "mcp>=1.30,<2",
+    "requests>=2.32,<3",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -22,53 +27,54 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
     "Topic :: Software Development :: Disassemblers",
-]
-dependencies = [
-    "mcp>=1.2.0,<2",
-    "httpx>=0.27,<1",
-    "tenacity>=8.2,<10",
 ]
 
 [project.optional-dependencies]
+headless = ["pyghidra>=3.1"]
+# angr 9.2.217 needs Python 3.12+; on older Pythons the angr tools report it as missing.
+# Its dependencies broke with newer releases: pyvex uses bitstring.ConstBitStream, which
+# bitstring 5 removed, and angr's C parser subclass fails with pycparser 3.1+.
 angr = [
-    "angr==9.2.217",
+    "angr==9.2.217; python_version >= '3.12'",
+    "bitstring>=4,<5; python_version >= '3.12'",
+    "pycparser<3.1; python_version >= '3.12'",
 ]
+
+[project.scripts]
+ghidra-mcp = "ghidra_mcp.cli:main"
+bridge_mcp_ghidra = "ghidra_mcp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/rustopian/Triangr"
 Repository = "https://github.com/rustopian/Triangr"
 Issues = "https://github.com/rustopian/Triangr/issues"
+Upstream = "https://github.com/LaurieWired/GhidraMCP"
 
-[project.scripts]
-bridge_mcp_ghidra = "bridge_mcp_ghidra:main"
-
-[tool.hatch.build]
-include = [
-    "bridge_mcp_ghidra.py",
-    "angr_decompile.py",
-    "README.md",
-    "LICENSE",
-]
+[dependency-groups]
+dev = ["pytest>=8"]
 
 [tool.hatch.version]
 source = "vcs"
-# Accept both "v1.5.1" and bare "1.5.1" style tags; the leading 'v' is
-# optional. Without this, hatch-vcs prints "tag '...' no version found"
-# and the build_sdist hook aborts with AssertionError.
+# Accept both "v1.5.1" and bare "1.5.1" style tags.
 tag-pattern = "v?(?P<version>\\d+\\.\\d+(?:\\.\\d+)?)"
 fallback-version = "0.0"
 
 [tool.hatch.build.targets.wheel]
-only-include = [
-    "bridge_mcp_ghidra.py",
-    "angr_decompile.py",
-]
+packages = ["src/ghidra_mcp"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+    "src/ghidra_mcp",
+    "tests",
     "bridge_mcp_ghidra.py",
-    "angr_decompile.py",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
+    "NOTICE",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["ghidra: requires a Ghidra installation (GHIDRA_INSTALL_DIR)"]
