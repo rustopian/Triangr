@@ -1,4 +1,4 @@
-name: Build with Maven
+name: Build
 
 on:
   push:
@@ -10,89 +10,90 @@ on:
 
 jobs:
   build:
+    # Builds the extension and runs every test, including headless integration tests, against
+    # each supported Ghidra release.
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - ghidra_version: "11.3.2"
-            ghidra_date: "20250415"
           - ghidra_version: "12.0.4"
             ghidra_date: "20260303"
+          - ghidra_version: "12.1.4"
+            ghidra_date: "20260921"
     env:
       GHIDRA_VERSION: ${{ matrix.ghidra_version }}
       GHIDRA_DATE: ${{ matrix.ghidra_date }}
-      GHIDRA_LIBS: >-
-        Features/Base/lib/Base.jar
-        Features/Decompiler/lib/Decompiler.jar
-        Framework/Docking/lib/Docking.jar
-        Framework/Generic/lib/Generic.jar
-        Framework/Project/lib/Project.jar
-        Framework/SoftwareModeling/lib/SoftwareModeling.jar
-        Framework/Utility/lib/Utility.jar
-        Framework/Gui/lib/Gui.jar
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        # hatch-vcs derives the package version from tags.
+        fetch-depth: 0
+
     - name: Set up JDK 21
       uses: actions/setup-java@v4
       with:
         java-version: '21'
         distribution: 'temurin'
-        cache: maven
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: '8.14'
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v6
 
     - name: Download Ghidra
       run: |
-        wget --no-verbose -O ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${{ env.GHIDRA_VERSION }}_build/ghidra_${{ env.GHIDRA_VERSION }}_PUBLIC_${{ env.GHIDRA_DATE }}.zip
+        wget --no-verbose -O ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip
         7z x -bd ghidra.zip
+        echo "GHIDRA_INSTALL_DIR=$PWD/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
 
-    - name: Copy Ghidra libs
-      run: |
-        mkdir -p ./lib
-        for libfile in ${{ env.GHIDRA_LIBS }}
-          do echo "Copying ${libfile} to lib/"
-          cp ghidra_${{ env.GHIDRA_VERSION }}_PUBLIC/Ghidra/${libfile} ./lib/
-        done
+    - name: Build Ghidra extension
+      working-directory: extension
+      run: gradle buildExtension
 
-    - name: Build with Maven
-      run: mvn clean package assembly:single
+    - name: Build Python package
+      run: uv build
+
+    - name: Python tests (including headless integration)
+      run: uv run --extra headless pytest -v
 
     - name: Assemble release directory
       run: |
         mkdir release
-        # Match any pom version (1.0-SNAPSHOT, 1.5.1, ...); the assembly
-        # plugin's finalName is GhidraMCP-${version}.zip.
-        cp target/GhidraMCP-*.zip release/
+        cp extension/dist/*.zip release/
+        cp dist/*.whl dist/*.tar.gz release/
         cp bridge_mcp_ghidra.py release/
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: GhidraMCP-artifact-${{ matrix.ghidra_version }}
-        path: |
-          release/*
+        path: release/*
 
   python-tests:
-    # Pure Python bridge contract tests; mocks the Ghidra HTTP server.
+    # Fast checks without Ghidra (the integration tests skip themselves) on the oldest and
+    # newest supported Python, plus installer script validation.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Validate installer script
         run: |
           bash -n scripts/install.sh
           scripts/install.sh --help >/dev/null
           scripts/install.sh --dry-run --no-install-deps --no-extension --no-angryghidra --prefix "$RUNNER_TEMP/triangr"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-      - name: Install bridge runtime deps + test deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install 'httpx>=0.27,<1' 'tenacity>=8.2,<10' 'mcp>=1.2.0,<2'
-          pip install -r requirements-dev.txt
+      - uses: astral-sh/setup-uv@v6
       - name: Run pytest
-        run: python -m pytest tests/test_bridge.py -v
+        run: uv run --python ${{ matrix.python-version }} pytest -v
 
   installer-smoke:
     # Full installer smoke test, kept separate because it downloads Ghidra and
@@ -103,6 +104,8 @@ jobs:
       TRIANGR_CACHE: /home/runner/.cache/triangr-ci
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -114,7 +117,6 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-          cache: maven
 
       - uses: gradle/actions/setup-gradle@v4
 
@@ -125,7 +127,7 @@ jobs:
             ${{ env.TRIANGR_CACHE }}
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: triangr-installer-${{ runner.os }}-ghidra-12.0.4-${{ hashFiles('requirements.txt', 'pom.xml', 'scripts/install.sh') }}
+          key: triangr-installer-${{ runner.os }}-ghidra-12.0.4-${{ hashFiles('requirements.txt', 'extension/build.gradle', 'scripts/install.sh') }}
           restore-keys: |
             triangr-installer-${{ runner.os }}-ghidra-12.0.4-
 
@@ -156,10 +158,12 @@ jobs:
         run: |
           source "$TRIANGR_PREFIX/env.sh"
           test -x "$GHIDRA_HOME/ghidraRun"
-          test -d "$GHIDRA_HOME/Ghidra/Extensions/GhidraMCP"
+          test -f "$GHIDRA_HOME/Ghidra/Extensions/GhidraMCP/lib/GhidraMCP.jar"
           test -x "$TRIANGR_PREFIX/bin/triangr-mcp"
           test -d "$GHIDRA_HOME/Ghidra/Extensions/AngryGhidra"
           "$GHIDRA_MCP_ANGR_PYTHON" -c "import angr; print(angr.__version__)"
-          "$GHIDRA_MCP_ANGR_PYTHON" -m bridge_mcp_ghidra --help >/dev/null
+          "$GHIDRA_MCP_ANGR_PYTHON" -c "import pyghidra"
+          "$GHIDRA_MCP_ANGR_PYTHON" -m ghidra_mcp --help >/dev/null
+          "$TRIANGR_PREFIX/venv/bin/bridge_mcp_ghidra" --help >/dev/null
           "$TRIANGR_PREFIX/bin/triangr-mcp" --help >/dev/null
           test -f "$ANGRYGHIDRA_SCRIPT"
